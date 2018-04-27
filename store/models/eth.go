@@ -3,7 +3,6 @@ package models
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -96,7 +95,7 @@ func (f *FunctionSelector) UnmarshalJSON(input []byte) error {
 	return nil
 }
 
-// Represents a block header in the Ethereum blockchain.
+// BlockHeader represents a block header in the Ethereum blockchain.
 // Deliberately does not have required fields because some fields aren't
 // present depending on the Ethereum node.
 // i.e. Parity does not always send mixHash
@@ -126,7 +125,7 @@ func (h BlockHeader) Hash() common.Hash {
 	return h.ParityHash
 }
 
-func (h BlockHeader) IndexableBlockNumber() *IndexableBlockNumber {
+func (h BlockHeader) ToIndexableBlockNumber() *IndexableBlockNumber {
 	return NewIndexableBlockNumber(h.Number.ToInt(), h.Hash())
 }
 
@@ -136,13 +135,9 @@ type IndexableBlockNumber struct {
 	Hash   common.Hash `json:"hash"`
 }
 
-func NewIndexableBlockNumber(bigint *big.Int, hashes ...common.Hash) *IndexableBlockNumber {
+func NewIndexableBlockNumber(bigint *big.Int, hash common.Hash) *IndexableBlockNumber {
 	if bigint == nil {
 		return nil
-	}
-	var hash common.Hash
-	if len(hashes) > 0 {
-		hash = hashes[0]
 	}
 	number := hexutil.Big(*bigint)
 	return &IndexableBlockNumber{
@@ -161,18 +156,6 @@ func (n *IndexableBlockNumber) ToInt() *big.Int {
 	return n.Number.ToInt()
 }
 
-// Return a hex string representation of the block number, or empty string if nil.
-func (n *IndexableBlockNumber) String() string {
-	if n == nil {
-		return ""
-	}
-	return n.Number.String()
-}
-
-func (n *IndexableBlockNumber) FriendlyString() string {
-	return fmt.Sprintf("#%v (%v)", n.ToInt(), n.String())
-}
-
 func (l *IndexableBlockNumber) GreaterThan(r *IndexableBlockNumber) bool {
 	if l == nil {
 		return false
@@ -188,13 +171,6 @@ func (l *IndexableBlockNumber) NextInt() *big.Int {
 		return big.NewInt(0)
 	}
 	return new(big.Int).Add(l.ToInt(), big.NewInt(1))
-}
-
-func (l *IndexableBlockNumber) NextNumber() *IndexableBlockNumber {
-	if l != nil {
-		return NewIndexableBlockNumber(l.NextInt(), l.Hash)
-	}
-	return NewIndexableBlockNumber(l.NextInt())
 }
 
 type EthSubscription interface {

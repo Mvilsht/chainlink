@@ -4,7 +4,7 @@ require('./support/helpers.js')
 
 contract('GetterSetter', () => {
   let GetterSetter = artifacts.require("examples/GetterSetter.sol");
-  let requestId = 5432;
+  let requestId = "0x" + toHex(rPad("5432"));
   let bytes32 = "Hi Mom!";
   let uint256 = 645746535432;
   let gs;
@@ -19,6 +19,14 @@ contract('GetterSetter', () => {
 
       let currentBytes32 = await gs.getBytes32.call();
       assert.equal(web3.toUtf8(currentBytes32), bytes32);
+    });
+
+    it("logs an event", async () => {
+      let tx = await gs.setBytes32(bytes32, {from: stranger});
+
+      assert.equal(1, tx.logs.length);
+      assert.equal(stranger, tx.logs[0].args.from);
+      assert.equal(bytes32, web3.toUtf8(tx.logs[0].args.value));
     });
   });
 
@@ -40,6 +48,14 @@ contract('GetterSetter', () => {
 
       let currentUint256 = await gs.getUint256.call();
       assert.equal(currentUint256, uint256);
+    });
+
+    it("logs an event", async () => {
+      let tx = await gs.setUint256(uint256, {from: stranger});
+
+      assert.equal(1, tx.logs.length);
+      assert.equal(stranger, tx.logs[0].args.from);
+      assert.equal(uint256, web3.toBigNumber(tx.logs[0].args.value));
     });
   });
 

@@ -15,7 +15,7 @@ The current node supports:
 - easy to implement smart contract libraries for connecting smart contracts directly to their preferred oracles
 - easy to install node, which runs natively across operating systems, blazingly fast, and with a low memory footprint
 
-Examples of how to utilize and integrate Chainlinks can be found in our [Hello Chainlink](https://github.com/smartcontractkit/hello_chainlink) repository. 
+Examples of how to utilize and integrate Chainlinks can be found in the [examples](./examples) directory.
 
 ## Install
 
@@ -44,7 +44,7 @@ By default this will start on port 6688, where it exposes a [REST API](https://g
 
 Once your node has started, you can view your current jobs with:
 ```bash
-$ chainlink jobs
+$ chainlink jobspecs
 ````
 View details of a specific job with:
 ```bash
@@ -67,7 +67,8 @@ You can configure your node's behavior by setting environment variables which ca
     ETH_URL                  Default: ws://localhost:8546
     ETH_CHAIN_ID             Default: 0
     ETH_GAS_BUMP_THRESHOLD   Default: 12
-    ETH_MIN_CONFIRMATIONS    Default: 12
+    TX_MIN_CONFIRMATIONS     Default: 12
+    TASK_MIN_CONFIRMATIONS   Default: 6
     ETH_GAS_BUMP_WEI         Default: 5000000000  (5 gwei)
     ETH_GAS_PRICE_DEFAULT    Default: 20000000000 (20 gwei)
 

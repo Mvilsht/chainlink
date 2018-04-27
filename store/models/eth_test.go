@@ -2,6 +2,7 @@ package models_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -13,16 +14,19 @@ import (
 )
 
 func TestModels_HexToFunctionSelector(t *testing.T) {
+	t.Parallel()
 	fid := models.HexToFunctionSelector("0xb3f98adc")
 	assert.Equal(t, "0xb3f98adc", fid.String())
 }
 
 func TestModels_HexToFunctionSelectorOverflow(t *testing.T) {
+	t.Parallel()
 	fid := models.HexToFunctionSelector("0xb3f98adc123456")
 	assert.Equal(t, "0xb3f98adc", fid.String())
 }
 
 func TestModels_FunctionSelectorUnmarshalJSON(t *testing.T) {
+	t.Parallel()
 	bytes := []byte(`"0xb3f98adc"`)
 	var fid models.FunctionSelector
 	err := json.Unmarshal(bytes, &fid)
@@ -31,6 +35,7 @@ func TestModels_FunctionSelectorUnmarshalJSON(t *testing.T) {
 }
 
 func TestModels_FunctionSelectorUnmarshalJSONError(t *testing.T) {
+	t.Parallel()
 	bytes := []byte(`"0xb3f98adc123456"`)
 	var fid models.FunctionSelector
 	err := json.Unmarshal(bytes, &fid)
@@ -38,6 +43,7 @@ func TestModels_FunctionSelectorUnmarshalJSONError(t *testing.T) {
 }
 
 func TestModels_Header_UnmarshalJSON(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		path       string
@@ -60,8 +66,6 @@ func TestModels_Header_UnmarshalJSON(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
 			var header models.BlockHeader
 
 			data := cltest.LoadJSON(test.path)
@@ -75,26 +79,26 @@ func TestModels_Header_UnmarshalJSON(t *testing.T) {
 }
 
 func TestModels_IndexableBlockNumber_New(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		input      *big.Int
-		want       string
-		wantDigits int
+		input *big.Int
+		want  string
 	}{
-		{big.NewInt(0), "0x0", 1},
-		{big.NewInt(0xf), "0xf", 1},
-		{big.NewInt(0x10), "0x10", 2},
+		{big.NewInt(0), "0"},
+		{big.NewInt(0xf), "f"},
+		{big.NewInt(0x10), "10"},
 	}
 	for _, test := range tests {
 		t.Run(test.want, func(t *testing.T) {
-			t.Parallel()
-			num := models.NewIndexableBlockNumber(test.input)
-			assert.Equal(t, test.want, num.String())
-			assert.Equal(t, test.wantDigits, num.Digits)
+			num := cltest.IndexableBlockNumber(test.input)
+			assert.Equal(t, test.want, fmt.Sprintf("%x", num.ToInt()))
+			assert.Equal(t, len(test.want), num.Digits)
 		})
 	}
 }
 
 func TestModels_IndexableBlockNumber_GreaterThan(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		left    *models.IndexableBlockNumber
@@ -102,21 +106,21 @@ func TestModels_IndexableBlockNumber_GreaterThan(t *testing.T) {
 		greater bool
 	}{
 		{"nil nil", nil, nil, false},
-		{"present nil", cltest.IndexableBlockNumber(1), nil, false},
-		{"nil present", cltest.IndexableBlockNumber(2), cltest.IndexableBlockNumber(1), false},
+		{"present nil", cltest.IndexableBlockNumber(1), nil, true},
+		{"nil present", nil, cltest.IndexableBlockNumber(1), false},
 		{"less", cltest.IndexableBlockNumber(1), cltest.IndexableBlockNumber(2), false},
 		{"equal", cltest.IndexableBlockNumber(2), cltest.IndexableBlockNumber(2), false},
 		{"greater", cltest.IndexableBlockNumber(2), cltest.IndexableBlockNumber(1), true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 			assert.Equal(t, test.greater, test.left.GreaterThan(test.right))
 		})
 	}
 }
 
 func TestModels_IndexableBlockNumber_NextInt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		bn   *models.IndexableBlockNumber
@@ -127,7 +131,6 @@ func TestModels_IndexableBlockNumber_NextInt(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 			assert.Equal(t, test.want, test.bn.NextInt())
 		})
 	}

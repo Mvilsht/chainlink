@@ -11,18 +11,6 @@ import (
 	null "gopkg.in/guregu/null.v3"
 )
 
-const (
-	// StatusInProgress is used for when a run is actively being executed.
-	StatusInProgress = "in progress"
-	// StatusPending is used for when a run is waiting on the completion
-	// of another event.
-	StatusPending = "pending"
-	// StatusErrored is used for when a run has errored and will not complete.
-	StatusErrored = "errored"
-	// StatusCompleted is used for when a run has successfully completed execution.
-	StatusCompleted = "completed"
-)
-
 // JobSpec is the definition for all the work to be carried out by the node
 // for a given contract. It contains the Initiators, Tasks (which are the
 // individual steps to be carried out), StartAt, EndAt, and CreatedAt fields.
@@ -33,6 +21,22 @@ type JobSpec struct {
 	StartAt    null.Time   `json:"startAt" storm:"index"`
 	EndAt      null.Time   `json:"endAt" storm:"index"`
 	CreatedAt  Time        `json:"createdAt" storm:"index"`
+}
+
+// GetID returns the ID of this structure for jsonapi serialization.
+func (j JobSpec) GetID() string {
+	return j.ID
+}
+
+// GetName returns the pluralized "type" of this structure for jsonapi serialization.
+func (j JobSpec) GetName() string {
+	return "specs"
+}
+
+// SetID is used to set the ID of this structure when deserializing from jsonapi documents.
+func (j *JobSpec) SetID(value string) error {
+	j.ID = value
+	return nil
 }
 
 // NewJob initializes a new job by generating a unique ID and setting
@@ -46,7 +50,7 @@ func NewJob() JobSpec {
 
 // NewRun initializes the job by creating the IDs for the job
 // and all associated tasks, and setting the CreatedAt field.
-func (j JobSpec) NewRun() JobRun {
+func (j JobSpec) NewRun(i Initiator) JobRun {
 	jrid := utils.NewBytes32ID()
 	taskRuns := make([]TaskRun, len(j.Tasks))
 	for i, task := range j.Tasks {
@@ -62,6 +66,7 @@ func (j JobSpec) NewRun() JobRun {
 		JobID:     j.ID,
 		CreatedAt: time.Now(),
 		TaskRuns:  taskRuns,
+		Initiator: i,
 	}
 }
 
@@ -89,7 +94,7 @@ func (j JobSpec) WebAuthorized() bool {
 	return false
 }
 
-// Returns true if any of the job's initiators are triggered by event logs.
+// IsLogInitiated Returns true if any of the job's initiators are triggered by event logs.
 func (j JobSpec) IsLogInitiated() bool {
 	for _, initr := range j.Initiators {
 		if initr.IsLogInitiated() {
@@ -129,9 +134,9 @@ const (
 	InitiatorWeb = "web"
 )
 
-// Initiator could be though of as a trigger, define how a Job can be
+// Initiator could be thought of as a trigger, defines how a Job can be
 // started, or rather, how a JobRun can be created from a Job.
-// Initiators will have their own unique ID, but will be assocated
+// Initiators will have their own unique ID, but will be associated
 // to a parent JobID.
 type Initiator struct {
 	ID       int            `json:"id" storm:"id,increment"`
@@ -157,7 +162,7 @@ func (i *Initiator) UnmarshalJSON(input []byte) error {
 	return nil
 }
 
-// Returns true if triggered by event logs.
+// IsLogInitiated Returns true if triggered by event logs.
 func (i Initiator) IsLogInitiated() bool {
 	return i.Type == InitiatorEthLog || i.Type == InitiatorRunLog
 }
@@ -166,8 +171,9 @@ func (i Initiator) IsLogInitiated() bool {
 // Type will be an adapter, and the Params will contain any
 // additional information that adapter would need to operate.
 type TaskSpec struct {
-	Type   string `json:"type" storm:"index"`
-	Params JSON
+	Type          string `json:"type" storm:"index"`
+	Confirmations uint64 `json:"confirmations"`
+	Params        JSON
 }
 
 // UnmarshalJSON parses the given input and updates the TaskSpec.
@@ -178,6 +184,7 @@ func (t *TaskSpec) UnmarshalJSON(input []byte) error {
 		return err
 	}
 
+	t.Confirmations = aux.Confirmations
 	t.Type = strings.ToLower(aux.Type)
 	var params json.RawMessage
 	if err := json.Unmarshal(input, &params); err != nil {
@@ -196,8 +203,9 @@ func (t TaskSpec) MarshalJSON() ([]byte, error) {
 // BridgeType is used for external adapters and has fields for
 // the name of the adapter and its URL.
 type BridgeType struct {
-	Name string `json:"name" storm:"id,unique"`
-	URL  WebURL `json:"url"`
+	Name                 string `json:"name" storm:"id,unique"`
+	URL                  WebURL `json:"url"`
+	DefaultConfirmations uint64 `json:"defaultConfirmations"`
 }
 
 // UnmarshalJSON parses the given input and updates the BridgeType
@@ -210,5 +218,6 @@ func (bt *BridgeType) UnmarshalJSON(input []byte) error {
 	}
 	bt.Name = strings.ToLower(aux.Name)
 	bt.URL = aux.URL
+	bt.DefaultConfirmations = aux.DefaultConfirmations
 	return nil
 }

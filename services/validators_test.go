@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"net/url"
+
 	"github.com/smartcontractkit/chainlink/internal/cltest"
 	"github.com/smartcontractkit/chainlink/services"
 	"github.com/smartcontractkit/chainlink/store/models"
@@ -39,6 +41,40 @@ func TestValidateJob(t *testing.T) {
 			assert.Nil(t, json.Unmarshal(test.input, &j))
 			result := services.ValidateJob(j, store)
 			assert.Equal(t, test.want, result)
+		})
+	}
+}
+
+func TestValidateAdapter(t *testing.T) {
+	t.Parallel()
+
+	store, cleanup := cltest.NewStore()
+	defer cleanup()
+
+	tt := models.BridgeType{}
+	tt.Name = "solargridreporting"
+	u, err := url.Parse("https://denergy.eth")
+	assert.Nil(t, err)
+	tt.URL = models.WebURL{u}
+	assert.Nil(t, store.Save(&tt))
+
+	tests := []struct {
+		description string
+		name        string
+		want        error
+	}{
+		{"existing external adapter", "solargridreporting",
+			errors.New("adapter validation: adapter solargridreporting exists")},
+		{"existing core adapter", "ethtx",
+			errors.New("adapter validation: adapter ethtx exists")},
+		{"new external adapter", "gdaxprice", nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			bt := &models.BridgeType{Name: test.name}
+			result := services.ValidateAdapter(bt, store)
+			assert.Equal(t, result, test.want)
 		})
 	}
 }

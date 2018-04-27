@@ -12,33 +12,40 @@ import (
 	null "gopkg.in/guregu/null.v3"
 )
 
-func TestJobSave(t *testing.T) {
+func TestJobSpec_Save(t *testing.T) {
 	t.Parallel()
 	store, cleanup := cltest.NewStore()
 	defer cleanup()
 
-	j1 := cltest.NewJobWithSchedule("* * * * 7")
+	j1, initr := cltest.NewJobWithSchedule("* * * * 7")
 	assert.Nil(t, store.SaveJob(&j1))
 
 	store.Save(j1)
 	j2, err := store.FindJob(j1.ID)
 	assert.Nil(t, err)
-	assert.Equal(t, j1.Initiators[0].Schedule, j2.Initiators[0].Schedule)
+	assert.Equal(t, initr.Schedule, j2.Initiators[0].Schedule)
 }
 
-func TestJobNewRun(t *testing.T) {
+func TestJobSpec_NewRun(t *testing.T) {
 	t.Parallel()
+	store, cleanup := cltest.NewStore()
+	defer cleanup()
 
-	job := cltest.NewJobWithSchedule("1 * * * *")
-	job.Tasks = []models.TaskSpec{{Type: "NoOp"}}
+	job, initr := cltest.NewJobWithSchedule("1 * * * *")
+	job.Tasks = []models.TaskSpec{cltest.NewTask("NoOp", `{"a":1}`)}
 
-	newRun := job.NewRun()
-	assert.Equal(t, job.ID, newRun.JobID)
-	assert.Equal(t, 1, len(newRun.TaskRuns))
-	assert.Equal(t, "NoOp", job.Tasks[0].Type)
-	assert.True(t, job.Tasks[0].Params.Empty())
-	adapter, _ := adapters.For(job.Tasks[0], nil)
+	run := job.NewRun(initr)
+
+	assert.Equal(t, job.ID, run.JobID)
+	assert.Equal(t, 1, len(run.TaskRuns))
+
+	taskRun := run.TaskRuns[0]
+	assert.Equal(t, "NoOp", taskRun.Task.Type)
+	adapter, _ := adapters.For(taskRun.Task, store)
 	assert.NotNil(t, adapter)
+	assert.JSONEq(t, `{"type":"NoOp","a":1}`, taskRun.Task.Params.String())
+
+	assert.Equal(t, initr, run.Initiator)
 }
 
 func TestJobEnded(t *testing.T) {
@@ -68,7 +75,7 @@ func TestJobEnded(t *testing.T) {
 	}
 }
 
-func TestJobStarted(t *testing.T) {
+func TestJobSpec_Started(t *testing.T) {
 	t.Parallel()
 
 	startAt := cltest.ParseNullableTime("3000-01-01T00:00:00.000Z")
@@ -95,15 +102,20 @@ func TestJobStarted(t *testing.T) {
 	}
 }
 
-func TestTaskUnmarshalling(t *testing.T) {
+func TestTask_UnmarshalJSON(t *testing.T) {
 	t.Parallel()
+	store, cleanup := cltest.NewStore()
+	defer cleanup()
 
 	tests := []struct {
-		name string
-		json string
+		name          string
+		taskType      string
+		confirmations uint64
+		json          string
 	}{
-		{"noop", `{"type":"NoOp"}`},
-		{"httpget", `{"type":"httpget","url":"http://www.no.com"}`},
+		{"noop", "noop", 0, `{"type":"NoOp"}`},
+		{"httpget", "httpget", 0, `{"type":"httpget","url":"http://www.no.com"}`},
+		{"with confirmations", "noop", 10, `{"type":"noOp","confirmations":10}`},
 	}
 
 	for _, test := range tests {
@@ -111,9 +123,10 @@ func TestTaskUnmarshalling(t *testing.T) {
 			var task models.TaskSpec
 			err := json.Unmarshal([]byte(test.json), &task)
 			assert.Nil(t, err)
+			assert.Equal(t, test.confirmations, task.Confirmations)
 
-			assert.Equal(t, test.name, task.Type)
-			_, err = adapters.For(task, nil)
+			assert.Equal(t, test.taskType, task.Type)
+			_, err = adapters.For(task, store)
 			assert.Nil(t, err)
 
 			s, err := json.Marshal(task)

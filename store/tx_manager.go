@@ -1,9 +1,12 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/smartcontractkit/chainlink/logger"
@@ -17,46 +20,56 @@ const defaultGasLimit uint64 = 500000
 // the local Config for the application, and the database.
 type TxManager struct {
 	*EthClient
-	KeyStore *KeyStore
-	Config   Config
-	ORM      *models.ORM
+	keyStore      *KeyStore
+	config        Config
+	orm           *models.ORM
+	activeAccount *ActiveAccount
 }
 
 // CreateTx signs and sends a transaction to the Ethereum blockchain.
 func (txm *TxManager) CreateTx(to common.Address, data []byte) (*models.Tx, error) {
-	account := txm.KeyStore.GetAccount()
-	nonce, err := txm.GetNonce(account.Address)
-	if err != nil {
-		return nil, err
+	if txm.activeAccount == nil {
+		return nil, errors.New("Must activate an account before creating a transaction")
 	}
-	tx, err := txm.ORM.CreateTx(
-		account.Address,
-		nonce,
-		to,
-		data,
-		big.NewInt(0),
-		defaultGasLimit,
-	)
-	if err != nil {
-		return nil, err
-	}
+
 	blkNum, err := txm.GetBlockNumber()
 	if err != nil {
 		return nil, err
 	}
 
-	gasPrice := &txm.Config.EthGasPriceDefault
-	_, err = txm.createAttempt(tx, gasPrice, blkNum)
-	if err != nil {
-		return tx, err
-	}
+	var tx *models.Tx
+	err = txm.activeAccount.GetAndIncrementNonce(func(nonce uint64) error {
+		tx, err = txm.orm.CreateTx(
+			txm.activeAccount.Address,
+			nonce,
+			to,
+			data,
+			big.NewInt(0),
+			defaultGasLimit,
+		)
+		if err != nil {
+			return err
+		}
 
-	return tx, nil
+		gasPrice := txm.config.EthGasPriceDefault
+		var txa *models.TxAttempt
+		txa, err = txm.createAttempt(tx, &gasPrice, blkNum)
+		if err != nil {
+			txm.orm.DeleteStruct(tx)
+			txm.orm.DeleteStruct(txa)
+
+			return err
+		}
+
+		return nil
+	})
+
+	return tx, err
 }
 
-// EnsureTxConfirmed returns true if the given transaction hash has been
+// MeetsMinConfirmations returns true if the given transaction hash has been
 // confirmed on the blockchain.
-func (txm *TxManager) EnsureTxConfirmed(hash common.Hash) (bool, error) {
+func (txm *TxManager) MeetsMinConfirmations(hash common.Hash) (bool, error) {
 	blkNum, err := txm.GetBlockNumber()
 	if err != nil {
 		return false, err
@@ -69,7 +82,7 @@ func (txm *TxManager) EnsureTxConfirmed(hash common.Hash) (bool, error) {
 		return false, fmt.Errorf("Can only ensure transactions with attempts")
 	}
 	tx := models.Tx{}
-	if err := txm.ORM.One("ID", attempts[0].TxID, &tx); err != nil {
+	if err := txm.orm.One("ID", attempts[0].TxID, &tx); err != nil {
 		return false, err
 	}
 
@@ -86,18 +99,26 @@ func (txm *TxManager) createAttempt(
 	tx *models.Tx,
 	gasPrice *big.Int,
 	blkNum uint64,
-) (*models.TxAttempt, error) {
+) (a *models.TxAttempt, err error) {
 	etx := tx.EthTx(gasPrice)
-	etx, err := txm.KeyStore.SignTx(etx, txm.Config.ChainID)
+	etx, err = txm.keyStore.SignTx(etx, txm.config.ChainID)
 	if err != nil {
 		return nil, err
 	}
 
-	a, err := txm.ORM.AddAttempt(tx, etx, blkNum)
+	a, err = txm.orm.AddAttempt(tx, etx, blkNum)
 	if err != nil {
 		return nil, err
 	}
-	return a, txm.sendTransaction(etx)
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New(fmt.Sprintf("error sending transaction: %v", r))
+		}
+	}()
+	err = txm.sendTransaction(etx)
+
+	return a, err
 }
 
 func (txm *TxManager) sendTransaction(tx *types.Transaction) error {
@@ -111,10 +132,10 @@ func (txm *TxManager) sendTransaction(tx *types.Transaction) error {
 
 func (txm *TxManager) getAttempts(hash common.Hash) ([]models.TxAttempt, error) {
 	attempt := &models.TxAttempt{}
-	if err := txm.ORM.One("Hash", hash, attempt); err != nil {
+	if err := txm.orm.One("Hash", hash, attempt); err != nil {
 		return []models.TxAttempt{}, err
 	}
-	attempts, err := txm.ORM.AttemptsFor(attempt.TxID)
+	attempts, err := txm.orm.AttemptsFor(attempt.TxID)
 	if err != nil {
 		return []models.TxAttempt{}, err
 	}
@@ -144,14 +165,15 @@ func (txm *TxManager) handleConfirmed(
 	blkNum uint64,
 ) (bool, error) {
 
-	minConfs := big.NewInt(int64(txm.Config.EthMinConfirmations))
+	minConfs := big.NewInt(int64(txm.config.TxMinConfirmations))
 	rcptBlkNum := big.Int(rcpt.BlockNumber)
 	safeAt := minConfs.Add(&rcptBlkNum, minConfs)
+	safeAt.Sub(safeAt, big.NewInt(1)) // 0 based indexing since rcpt is 1 conf
 	if big.NewInt(int64(blkNum)).Cmp(safeAt) == -1 {
 		return false, nil
 	}
 
-	if err := txm.ORM.ConfirmTx(tx, txat); err != nil {
+	if err := txm.orm.ConfirmTx(tx, txat); err != nil {
 		return false, err
 	}
 	logger.Infow(fmt.Sprintf("Confirmed tx %v", txat.Hash.String()), "txat", txat, "receipt", rcpt)
@@ -164,7 +186,7 @@ func (txm *TxManager) handleUnconfirmed(
 	blkNum uint64,
 ) (bool, error) {
 	bumpable := tx.Hash == txat.Hash
-	pastThreshold := blkNum >= txat.SentAt+txm.Config.EthGasBumpThreshold
+	pastThreshold := blkNum >= txat.SentAt+txm.config.EthGasBumpThreshold
 	if bumpable && pastThreshold {
 		return false, txm.bumpGas(txat, blkNum)
 	}
@@ -173,11 +195,62 @@ func (txm *TxManager) handleUnconfirmed(
 
 func (txm *TxManager) bumpGas(txat *models.TxAttempt, blkNum uint64) error {
 	tx := &models.Tx{}
-	if err := txm.ORM.One("ID", txat.TxID, tx); err != nil {
+	if err := txm.orm.One("ID", txat.TxID, tx); err != nil {
 		return err
 	}
-	gasPrice := new(big.Int).Add(txat.GasPrice, &txm.Config.EthGasBumpWei)
+	gasPrice := new(big.Int).Add(txat.GasPrice, &txm.config.EthGasBumpWei)
 	txat, err := txm.createAttempt(tx, gasPrice, blkNum)
 	logger.Infow(fmt.Sprintf("Bumping gas to %v for transaction %v", gasPrice, txat.Hash.String()), "txat", txat)
+	return err
+}
+
+// GetActiveAccount returns a copy of the TxManager's active nonce managed
+// account.
+func (txm *TxManager) GetActiveAccount() *ActiveAccount {
+	if txm.activeAccount == nil {
+		return nil
+	}
+	return &ActiveAccount{
+		Account: txm.activeAccount.Account,
+		nonce:   txm.activeAccount.nonce,
+	}
+}
+
+// ActivateAccount retrieves an account's nonce from the blockchain for client
+// side management in ActiveAccount.
+func (txm *TxManager) ActivateAccount(account accounts.Account) error {
+	nonce, err := txm.GetNonce(account.Address)
+	if err != nil {
+		return err
+	}
+
+	txm.activeAccount = &ActiveAccount{Account: account, nonce: nonce}
+	return nil
+}
+
+// ActiveAccount holds the account information alongside a client managed nonce
+// to coordinate outgoing transactions.
+type ActiveAccount struct {
+	accounts.Account
+	nonce uint64
+	mutex sync.Mutex
+}
+
+// GetNonce returns the client side managed nonce.
+func (a *ActiveAccount) GetNonce() uint64 {
+	return a.nonce
+}
+
+// Yield the current nonce to a callback function and increment it once the
+// callback has finished executing
+func (a *ActiveAccount) GetAndIncrementNonce(callback func(uint64) error) error {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	err := callback(a.nonce)
+	if err == nil {
+		a.nonce = a.nonce + 1
+	}
+
 	return err
 }

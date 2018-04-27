@@ -1,5 +1,8 @@
 BigNumber = require('bignumber.js');
 moment = require('moment');
+abi = require('ethereumjs-abi');
+util = require('ethereumjs-util');
+cbor = require("cbor");
 
 (() => {
   eth = web3.eth;
@@ -198,6 +201,63 @@ moment = require('moment');
 
   functionSelector = function functionSelector(signature) {
     return "0x" + web3.sha3(signature).slice(2).slice(0, 8);
+  };
+
+  rPad = function rPad(string) {
+    let wordLen = parseInt((string.length + 31) / 32) * 32;
+    for (let i = string.length; i < wordLen; i++) {
+      string = string + "\x00";
+    }
+    return string
+  };
+
+  lPad = function lPad(string) {
+    let wordLen = parseInt((string.length + 31) / 32) * 32;
+    for (let i = string.length; i < wordLen; i++) {
+      string = "\x00" + string;
+    }
+    return string
+  };
+
+  lPadHex = function lPadHex(string) {
+    let wordLen = parseInt((string.length + 63) / 64) * 64;
+    for (let i = string.length; i < wordLen; i++) {
+      string = "0" + string;
+    }
+    return string
+  };
+
+  toHex = function toHex(arg) {
+    if (arg instanceof Buffer) {
+      return arg.toString("hex");
+    } else {
+      return Buffer.from(arg, "ascii").toString("hex");
+    }
+  };
+
+  decodeRunABI = function decodeRunABI(log) {
+    let runABI = util.toBuffer(log.data);
+    let types = ["bytes32", "address", "bytes4", "bytes"];
+    return abi.rawDecode(types, runABI);
+  };
+
+  decodeRunRequest = function decodeRunRequest(log) {
+    let runABI = util.toBuffer(log.data);
+    let types = ["uint256", "bytes"];
+    let [version, data] = abi.rawDecode(types, runABI);
+    return [log.topics[1], log.topics[2], log.topics[3], version, data];
+  };
+
+  requestDataBytes = function requestDataBytes(jobId, to, fHash, runId, data) {
+    let types = ["uint256", "bytes32", "address", "bytes4", "bytes32", "bytes"];
+    let values = [1, jobId, to, fHash, runId, data];
+    let funcSelector = functionSelector("requestData(uint256,bytes32,address,bytes4,bytes32,bytes)");
+    let encoded = abi.rawEncode(types, values);
+    return funcSelector + encoded.toString("hex");
+  };
+
+  requestDataFrom = function requestDataFrom(oc, link, amount, args) {
+    return link.transferAndCall(oc.address, amount, args);
   };
 
 })();

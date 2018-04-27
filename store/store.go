@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"os"
+	"path"
 	"time"
 
 	"github.com/ethereum/go-ethereum/rpc"
@@ -28,16 +29,34 @@ func (wrapper rpcSubscriptionWrapper) EthSubscribe(ctx context.Context, channel 
 	return wrapper.Client.EthSubscribe(ctx, channel, args...)
 }
 
+type Dialer interface {
+	Dial(string) (CallerSubscriber, error)
+}
+
+type EthDialer struct{}
+
+func (EthDialer) Dial(url string) (CallerSubscriber, error) {
+	dialed, err := rpc.Dial(url)
+	if err != nil {
+		return nil, err
+	}
+	return rpcSubscriptionWrapper{dialed}, nil
+}
+
 // NewStore will create a new database file at the config's RootDir if
 // it is not already present, otherwise it will use the existing db.bolt
 // file.
 func NewStore(config Config) *Store {
+	return NewStoreWithDialer(config, EthDialer{})
+}
+
+func NewStoreWithDialer(config Config, dialer Dialer) *Store {
 	err := os.MkdirAll(config.RootDir, os.FileMode(0700))
 	if err != nil {
 		logger.Fatal(err)
 	}
-	orm := models.NewORM(config.RootDir)
-	ethrpc, err := rpc.Dial(config.EthereumURL)
+	orm := models.NewORM(path.Join(config.RootDir, "db.bolt"))
+	ethrpc, err := dialer.Dial(config.EthereumURL)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -49,13 +68,22 @@ func NewStore(config Config) *Store {
 		KeyStore: keyStore,
 		Clock:    Clock{},
 		TxManager: &TxManager{
-			Config:    config,
-			EthClient: &EthClient{rpcSubscriptionWrapper{ethrpc}},
-			KeyStore:  keyStore,
-			ORM:       orm,
+			EthClient: &EthClient{ethrpc},
+			config:    config,
+			keyStore:  keyStore,
+			orm:       orm,
 		},
 	}
 	return store
+}
+
+// Start initiates all of Store's dependencies including the TxManager.
+func (s *Store) Start() error {
+	acc, err := s.KeyStore.GetAccount()
+	if err != nil {
+		return err
+	}
+	return s.TxManager.ActivateAccount(acc)
 }
 
 // AfterNower is an interface that fulfills the `After()` and `Now()`

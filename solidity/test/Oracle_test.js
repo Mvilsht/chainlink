@@ -4,22 +4,26 @@ require('./support/helpers.js')
 
 contract('Oracle', () => {
   let Oracle = artifacts.require("Oracle.sol");
+  let LinkToken = artifacts.require("LinkToken.sol");
   let GetterSetter = artifacts.require("examples/GetterSetter.sol");
-  let fHash = "0x12345678";
+  let fHash = functionSelector("requestedBytes32(bytes32,bytes32)");;
   let jobId = "4c7b7ffb66b344fbaa64995af81e355a";
   let to = "0x80e29acb842498fe6591f020bd82766dce619d43";
-  let oc;
+  let link, oc;
 
   beforeEach(async () => {
-    oc = await Oracle.new({from: oracleNode});
+    link = await LinkToken.new();
+    oc = await Oracle.new(link.address, {from: oracleNode});
   });
 
   it("has a limited public interface", () => {
     checkPublicABI(Oracle, [
-      "owner",
-      "transferOwnership",
-      "requestData",
       "fulfillData",
+      "onTokenTransfer",
+      "owner",
+      "requestData",
+      "transferOwnership",
+      "withdraw",
     ]);
   });
 
@@ -45,51 +49,71 @@ contract('Oracle', () => {
     });
   });
 
+  describe("#onTokenTransfer", () => {
+    context("when called from the LINK token", () => {
+      it("triggers the intended method", async () => {
+        let callData = requestDataBytes(jobId, to, fHash, "id", "");
+
+        let tx = await link.transferAndCall(oc.address, 0, callData);
+        assert.equal(3, tx.receipt.logs.length)
+      });
+    });
+
+    context("when called from any address but the LINK token", () => {
+      it("triggers the intended method", async () => {
+        let callData = requestDataBytes(jobId, to, fHash, "id", "");
+
+        await assertActionThrows(async () => {
+          let tx = await oc.onTokenTransfer(oracleNode, 0, callData);
+        });
+      });
+    });
+  });
+
   describe("#requestData", () => {
-    it("returns the id", async () => {
-      let requestId = await oc.requestData.call(jobId, to, fHash, "");
-      assert.equal(1, requestId);
+    context("when called through the LINK token", () => {
+      let log, tx;
+      beforeEach(async () => {
+        let args = requestDataBytes(jobId, to, fHash, "id", "");
+        tx = await requestDataFrom(oc, link, 0, args);
+        assert.equal(3, tx.receipt.logs.length)
+
+        log = tx.receipt.logs[2];
+      });
+
+      it("logs an event", async () => {
+        assert.equal(jobId, web3.toUtf8(log.topics[2]));
+      });
+
+      it("uses the expected event signature", async () => {
+        // If updating this test, be sure to update TestServices_RunLogTopic_ExpectedEventSignature.
+        let eventSignature = "0x3fab86a1207bdcfe3976d0d9df25f263d45ae8d381a60960559771a2b223974d";
+        assert.equal(eventSignature, log.topics[0]);
+      });
     });
 
-    it("logs an event", async () => {
-      let tx = await oc.requestData(jobId, to, fHash, "");
-      assert.equal(1, tx.receipt.logs.length)
-
-      let log = tx.receipt.logs[0];
-      assert.equal(jobId, web3.toUtf8(log.topics[2]));
-    });
-
-    it("uses the expected event signature", async () => {
-      // If updating this test, be sure to update TestServices_RunLogTopic_ExpectedEventSignature.
-      let tx = await oc.requestData(jobId, to, fHash, "");
-      assert.equal(1, tx.receipt.logs.length)
-
-      let log = tx.receipt.logs[0];
-      let eventSignature = "0x06f4bf36b4e011a5c499cef1113c2d166800ce4013f6c2509cab1a0e92b83fb2";
-      assert.equal(eventSignature, log.topics[0]);
-    });
-
-    it("increments the request ID", async () => {
-      let tx1 = await oc.requestData(jobId, to, fHash, "");
-      let requestId1 = web3.toDecimal(tx1.receipt.logs[0].topics[1]);
-      let tx2 = await oc.requestData(jobId, to, fHash, "");
-      let requestId2 = web3.toDecimal(tx2.receipt.logs[0].topics[1]);
-
-      assert.notEqual(requestId1, requestId2);
+    context("when not called through the LINK token", () => {
+      it("logs an event", async () => {
+        await assertActionThrows(async () => {
+          let tx = await oc.requestData(1, jobId, to, fHash, "id", "", {from: oracleNode});
+        });
+      });
     });
   });
 
   describe("#fulfillData", () => {
     let mock, requestId;
+    let externalId = "XID";
 
     beforeEach(async () => {
       mock = await GetterSetter.new();
-      let fHash = functionSelector("requestedBytes32(uint256,bytes32)");
-      let req = await oc.requestData(jobId, mock.address, fHash, "");
-      requestId = web3.toDecimal(req.receipt.logs[0].topics[1]);
+      let fHash = functionSelector("requestedBytes32(bytes32,bytes32)");
+      let args = requestDataBytes(jobId, mock.address, fHash, externalId, "");
+      let req = await requestDataFrom(oc, link, 0, args);
+      requestId = req.receipt.logs[2].topics[1];
     });
 
-    context("when the called by a non-owner", () => {
+    context("when called by a non-owner", () => {
       it("raises an error", async () => {
         await assertActionThrows(async () => {
           await oc.fulfillData(requestId, "Hello World!", {from: stranger});
@@ -100,15 +124,15 @@ contract('Oracle', () => {
     context("when called by an owner", () => {
       it("raises an error if the request ID does not exist", async () => {
         await assertActionThrows(async () => {
-          await oc.fulfillData(requestId + 1, "Hello World!", {from: oracleNode});
+          await oc.fulfillData(requestId + 10000, "Hello World!", {from: oracleNode});
         });
       });
 
       it("sets the value on the requested contract", async () => {
         await oc.fulfillData(requestId, "Hello World!", {from: oracleNode});
 
-        let currentRequestId = await mock.requestId.call();
-        assert.equal(requestId, web3.toDecimal(currentRequestId));
+        let currentExternalId = await mock.requestId.call();
+        assert.equal(externalId.toString(), web3.toUtf8(currentExternalId));
 
         let currentValue = await mock.getBytes32.call();
         assert.equal("Hello World!", web3.toUtf8(currentValue));
@@ -118,6 +142,58 @@ contract('Oracle', () => {
         await oc.fulfillData(requestId, "First message!", {from: oracleNode});
         await assertActionThrows(async () => {
           await oc.fulfillData(requestId, "Second message!!", {from: oracleNode});
+        });
+      });
+    });
+  });
+
+  describe("#withdraw", () => {
+    context("without reserving funds via requestData", () => {
+      it("does nothing", async () => {
+        let balance = await link.balanceOf(oracleNode);
+        assert.equal(0, balance);
+        await oc.withdraw({from: oracleNode});
+        balance = await link.balanceOf(oracleNode);
+        assert.equal(0, balance);
+      });
+    });
+
+    context("reserving funds via requestData", () => {
+      let log, tx, mock, internalId, amount;
+      beforeEach(async () => {
+        amount = 15;
+        mock = await GetterSetter.new();
+        let args = requestDataBytes(jobId, mock.address, fHash, "id", "");
+        tx = await requestDataFrom(oc, link, amount, args);
+        assert.equal(3, tx.receipt.logs.length)
+
+        log = tx.receipt.logs[2];
+        internalId = log.topics[1];
+      });
+
+      context("but not freeing funds w fulfillData", () => {
+        it("does not transfer funds", async () => {
+          await oc.withdraw({from: oracleNode});
+          let balance = await link.balanceOf(oracleNode);
+          assert.equal(0, balance);
+        });
+      });
+
+      context("and freeing funds", () => {
+        beforeEach(async () => {
+          await oc.fulfillData(internalId, "Hello World!", {from: oracleNode});
+        });
+
+        it("allows transfer of funds by owner", async () => {
+          await oc.withdraw({from: oracleNode});
+          let balance = await link.balanceOf(oracleNode);
+          assert.equal(amount, balance);
+        });
+
+        it("does not allow a transfer of funds by non-owner", async () => {
+          await assertActionThrows(async () => {
+            await oc.withdraw({from: stranger});
+          });
         });
       });
     });

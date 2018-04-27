@@ -28,10 +28,12 @@ func TestEthTxAdapter_Perform_Confirmed(t *testing.T) {
 
 	ethMock := app.MockEthClient()
 	ethMock.Register("eth_getTransactionCount", `0x0100`)
+	assert.Nil(t, app.Start())
+
 	hash := cltest.NewHash()
 	sentAt := uint64(23456)
 	confirmed := sentAt + 1
-	safe := confirmed + config.EthMinConfirmations
+	safe := confirmed + config.TxMinConfirmations
 	ethMock.Register("eth_sendRawTransaction", hash,
 		func(_ interface{}, data ...interface{}) error {
 			rlp := data[0].([]interface{})[0].(string)
@@ -57,7 +59,7 @@ func TestEthTxAdapter_Perform_Confirmed(t *testing.T) {
 
 	assert.False(t, data.HasError())
 
-	from := store.KeyStore.GetAccount().Address
+	from := cltest.GetAccountAddress(store)
 	txs := []models.Tx{}
 	assert.Nil(t, store.Where("From", from, &txs))
 	assert.Equal(t, 1, len(txs))
@@ -67,7 +69,7 @@ func TestEthTxAdapter_Perform_Confirmed(t *testing.T) {
 	ethMock.EventuallyAllCalled(t)
 }
 
-func TestEthTxAdapter_Perform_FromPending(t *testing.T) {
+func TestEthTxAdapter_Perform_FromPendingConfirmations_StillPending(t *testing.T) {
 	t.Parallel()
 
 	app, cleanup := cltest.NewApplicationWithKeyStore()
@@ -80,19 +82,19 @@ func TestEthTxAdapter_Perform_FromPending(t *testing.T) {
 	sentAt := uint64(23456)
 	ethMock.Register("eth_blockNumber", utils.Uint64ToHex(sentAt+config.EthGasBumpThreshold-1))
 
-	from := store.KeyStore.GetAccount().Address
+	from := cltest.GetAccountAddress(store)
 	tx := cltest.NewTx(from, sentAt)
 	assert.Nil(t, store.Save(tx))
 	a, err := store.AddAttempt(tx, tx.EthTx(big.NewInt(1)), sentAt)
 	assert.Nil(t, err)
 	adapter := adapters.EthTx{}
 	sentResult := cltest.RunResultWithValue(a.Hash.String())
-	input := sentResult.MarkPending()
+	input := sentResult.MarkPendingConfirmations()
 
 	output := adapter.Perform(input, store)
 
 	assert.False(t, output.HasError())
-	assert.True(t, output.Pending)
+	assert.True(t, output.Status.PendingConfirmations())
 	assert.Nil(t, store.One("ID", tx.ID, tx))
 	attempts, _ := store.AttemptsFor(tx.ID)
 	assert.Equal(t, 1, len(attempts))
@@ -100,7 +102,7 @@ func TestEthTxAdapter_Perform_FromPending(t *testing.T) {
 	ethMock.EventuallyAllCalled(t)
 }
 
-func TestEthTxAdapter_Perform_FromPendingBumpGas(t *testing.T) {
+func TestEthTxAdapter_Perform_FromPendingConfirmations_BumpGas(t *testing.T) {
 	t.Parallel()
 
 	app, cleanup := cltest.NewApplicationWithKeyStore()
@@ -114,19 +116,19 @@ func TestEthTxAdapter_Perform_FromPendingBumpGas(t *testing.T) {
 	ethMock.Register("eth_blockNumber", utils.Uint64ToHex(sentAt+config.EthGasBumpThreshold))
 	ethMock.Register("eth_sendRawTransaction", cltest.NewHash())
 
-	from := store.KeyStore.GetAccount().Address
+	from := cltest.GetAccountAddress(store)
 	tx := cltest.NewTx(from, sentAt)
 	assert.Nil(t, store.Save(tx))
 	a, err := store.AddAttempt(tx, tx.EthTx(big.NewInt(1)), 1)
 	assert.Nil(t, err)
 	adapter := adapters.EthTx{}
 	sentResult := cltest.RunResultWithValue(a.Hash.String())
-	input := sentResult.MarkPending()
+	input := sentResult.MarkPendingConfirmations()
 
 	output := adapter.Perform(input, store)
 
 	assert.False(t, output.HasError())
-	assert.True(t, output.Pending)
+	assert.True(t, output.Status.PendingConfirmations())
 	assert.Nil(t, store.One("ID", tx.ID, tx))
 	attempts, _ := store.AttemptsFor(tx.ID)
 	assert.Equal(t, 2, len(attempts))
@@ -134,7 +136,7 @@ func TestEthTxAdapter_Perform_FromPendingBumpGas(t *testing.T) {
 	ethMock.EventuallyAllCalled(t)
 }
 
-func TestEthTxAdapter_Perform_FromPendingConfirm(t *testing.T) {
+func TestEthTxAdapter_Perform_FromPendingConfirmations_ConfirmCompletes(t *testing.T) {
 	t.Parallel()
 
 	app, cleanup := cltest.NewApplicationWithKeyStore()
@@ -150,7 +152,8 @@ func TestEthTxAdapter_Perform_FromPendingConfirm(t *testing.T) {
 		Hash:        cltest.NewHash(),
 		BlockNumber: cltest.BigHexInt(sentAt),
 	})
-	ethMock.Register("eth_blockNumber", utils.Uint64ToHex(sentAt+config.EthMinConfirmations))
+	confirmedAt := sentAt + config.TxMinConfirmations - 1 // confirmations are 0-based idx
+	ethMock.Register("eth_blockNumber", utils.Uint64ToHex(confirmedAt))
 
 	tx := cltest.NewTx(cltest.NewAddress(), sentAt)
 	assert.Nil(t, store.Save(tx))
@@ -159,13 +162,13 @@ func TestEthTxAdapter_Perform_FromPendingConfirm(t *testing.T) {
 	a3, _ := store.AddAttempt(tx, tx.EthTx(big.NewInt(3)), sentAt+2)
 	adapter := adapters.EthTx{}
 	sentResult := cltest.RunResultWithValue(a3.Hash.String())
-	input := sentResult.MarkPending()
+	input := sentResult.MarkPendingConfirmations()
 
 	assert.False(t, tx.Confirmed)
 
 	output := adapter.Perform(input, store)
 
-	assert.False(t, output.Pending)
+	assert.True(t, output.Status.Completed())
 	assert.False(t, output.HasError())
 
 	assert.Nil(t, store.One("ID", tx.ID, tx))
@@ -186,15 +189,17 @@ func TestEthTxAdapter_Perform_WithError(t *testing.T) {
 
 	store := app.Store
 	ethMock := app.MockEthClient()
-	ethMock.RegisterError("eth_getTransactionCount", "Cannot connect to nodes")
+	ethMock.Register("eth_getTransactionCount", `0x0100`)
+	assert.Nil(t, app.Start())
 
 	adapter := adapters.EthTx{
 		Address:          cltest.NewAddress(),
 		FunctionSelector: models.HexToFunctionSelector("0xb3f98adc"),
 	}
 	input := cltest.RunResultWithValue("")
+	ethMock.RegisterError("eth_blockNumber", "Cannot connect to nodes")
 	output := adapter.Perform(input, store)
 
 	assert.True(t, output.HasError())
-	assert.Equal(t, output.Error(), "Cannot connect to nodes")
+	assert.Equal(t, "Cannot connect to nodes", output.Error())
 }

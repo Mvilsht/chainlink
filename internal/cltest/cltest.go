@@ -13,16 +13,16 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/h2non/gock"
 	"github.com/onsi/gomega"
+	"github.com/smartcontractkit/chainlink/adapters"
 	"github.com/smartcontractkit/chainlink/cmd"
 	"github.com/smartcontractkit/chainlink/logger"
 	"github.com/smartcontractkit/chainlink/services"
@@ -46,6 +46,7 @@ var storeCounter uint64 = 0
 func init() {
 	gin.SetMode(gin.TestMode)
 	gomega.SetDefaultEventuallyTimeout(3 * time.Second)
+	logger.SetLogger(logger.CreateTestLogger())
 }
 
 type TestConfig struct {
@@ -63,15 +64,16 @@ func NewConfigWithWSServer(wsserver *httptest.Server) *TestConfig {
 	rootdir := path.Join(RootDir, fmt.Sprintf("%d-%d", time.Now().UnixNano(), count))
 	config := TestConfig{
 		Config: store.Config{
-			LogLevel:            store.LogLevel{zapcore.DebugLevel},
-			RootDir:             rootdir,
-			BasicAuthUsername:   Username,
-			BasicAuthPassword:   Password,
-			ChainID:             3,
-			EthMinConfirmations: 6,
-			EthGasBumpWei:       *big.NewInt(5000000000),
-			EthGasBumpThreshold: 3,
-			EthGasPriceDefault:  *big.NewInt(20000000000),
+			LogLevel:             store.LogLevel{Level: zapcore.DebugLevel},
+			RootDir:              rootdir,
+			BasicAuthUsername:    Username,
+			BasicAuthPassword:    Password,
+			ChainID:              3,
+			TxMinConfirmations:   6,
+			TaskMinConfirmations: 0,
+			EthGasBumpWei:        *big.NewInt(5000000000),
+			EthGasBumpThreshold:  3,
+			EthGasPriceDefault:   *big.NewInt(20000000000),
 		},
 	}
 	config.SetEthereumServer(wsserver)
@@ -109,8 +111,12 @@ func NewWSServer(msg string) *httptest.Server {
 }
 
 func NewApplication() (*TestApplication, func()) {
-	c, _ := NewConfig()
-	return NewApplicationWithConfig(c)
+	c, cfgCleanup := NewConfig()
+	app, cleanup := NewApplicationWithConfig(c)
+	return app, func() {
+		cleanup()
+		cfgCleanup()
+	}
 }
 
 func NewApplicationWithConfig(tc *TestConfig) (*TestApplication, func()) {
@@ -133,7 +139,16 @@ func NewApplicationWithConfig(tc *TestConfig) (*TestApplication, func()) {
 }
 
 func NewApplicationWithKeyStore() (*TestApplication, func()) {
-	app, cleanup := NewApplication()
+	config, cfgCleanup := NewConfig()
+	app, cleanup := NewApplicationWithConfigAndKeyStore(config)
+	return app, func() {
+		cleanup()
+		cfgCleanup()
+	}
+}
+
+func NewApplicationWithConfigAndKeyStore(tc *TestConfig) (*TestApplication, func()) {
+	app, cleanup := NewApplicationWithConfig(tc)
 	_, err := app.Store.KeyStore.NewAccount(Password)
 	mustNotErr(err)
 	mustNotErr(app.Store.KeyStore.Unlock(Password))
@@ -272,7 +287,7 @@ func ParseResponseBody(resp *http.Response) []byte {
 
 func ObserveLogs() *observer.ObservedLogs {
 	core, observed := observer.New(zapcore.DebugLevel)
-	logger.SetLogger(logger.NewLogger(zap.New(core)))
+	logger.SetLogger(zap.New(core))
 	return observed
 }
 
@@ -283,11 +298,34 @@ func FixtureCreateJobViaWeb(t *testing.T, app *TestApplication, path string) mod
 		bytes.NewBuffer(LoadJSON(path)),
 	)
 	defer resp.Body.Close()
-	CheckStatusCode(t, resp, 200)
-	j, err := app.Store.FindJob(ParseCommonJSON(resp.Body).ID)
-	assert.Nil(t, err)
+	AssertServerResponse(t, resp, 200)
+
+	return FindJob(app.Store, ParseCommonJSON(resp.Body).ID)
+}
+
+func FindJob(s *store.Store, id string) models.JobSpec {
+	j, err := s.FindJob(id)
+	mustNotErr(err)
 
 	return j
+}
+
+func FindJobRun(s *store.Store, id string) models.JobRun {
+	j, err := s.FindJobRun(id)
+	mustNotErr(err)
+
+	return j
+}
+
+func FixtureCreateJobWithAssignmentViaWeb(t *testing.T, app *TestApplication, path string) models.JobSpec {
+	resp := BasicAuthPost(
+		app.Server.URL+"/v1/assignments",
+		"application/json",
+		bytes.NewBuffer(LoadJSON(path)),
+	)
+	defer resp.Body.Close()
+	AssertServerResponse(t, resp, 200)
+	return FindJob(app.Store, ParseCommonJSON(resp.Body).ID)
 }
 
 func CreateJobSpecViaWeb(t *testing.T, app *TestApplication, job models.JobSpec) models.JobSpec {
@@ -299,11 +337,8 @@ func CreateJobSpecViaWeb(t *testing.T, app *TestApplication, job models.JobSpec)
 		bytes.NewBuffer(marshaled),
 	)
 	defer resp.Body.Close()
-	CheckStatusCode(t, resp, 200)
-	j, err := app.Store.FindJob(ParseCommonJSON(resp.Body).ID)
-	assert.Nil(t, err)
-
-	return j
+	AssertServerResponse(t, resp, 200)
+	return FindJob(app.Store, ParseCommonJSON(resp.Body).ID)
 }
 
 func CreateJobRunViaWeb(t *testing.T, app *TestApplication, j models.JobSpec, body ...string) models.JobRun {
@@ -315,7 +350,7 @@ func CreateJobRunViaWeb(t *testing.T, app *TestApplication, j models.JobSpec, bo
 	}
 	resp := BasicAuthPost(url, "application/json", bodyBuffer)
 	defer resp.Body.Close()
-	CheckStatusCode(t, resp, 200)
+	AssertServerResponse(t, resp, 200)
 	jrID := ParseCommonJSON(resp.Body).ID
 
 	jrs := []models.JobRun{}
@@ -340,7 +375,7 @@ func UpdateJobRunViaWeb(
 	resp := BasicAuthPatch(url, "application/json", bytes.NewBufferString(body))
 	defer resp.Body.Close()
 
-	CheckStatusCode(t, resp, 200)
+	AssertServerResponse(t, resp, 200)
 	jrID := ParseCommonJSON(resp.Body).ID
 	assert.Nil(t, app.Store.One("ID", jrID, &jr))
 	return jr
@@ -357,7 +392,7 @@ func CreateBridgeTypeViaWeb(
 		bytes.NewBufferString(payload),
 	)
 	defer resp.Body.Close()
-	CheckStatusCode(t, resp, 200)
+	AssertServerResponse(t, resp, 200)
 	var bt models.BridgeType
 	name := ParseCommonJSON(resp.Body).Name
 	assert.Nil(t, app.Store.One("Name", name, &bt))
@@ -368,23 +403,13 @@ func CreateBridgeTypeViaWeb(
 func NewClientAndRenderer(config store.Config) (*cmd.Client, *RendererMock) {
 	r := &RendererMock{}
 	client := &cmd.Client{
-		r,
-		config,
-		EmptyAppFactory{},
-		CallbackAuthenticator{func(*store.Store, string) {}},
-		EmptyRunner{},
+		Renderer:   r,
+		Config:     config,
+		AppFactory: EmptyAppFactory{},
+		Auth:       CallbackAuthenticator{func(*store.Store, string) {}},
+		Runner:     EmptyRunner{},
 	}
 	return client, r
-}
-
-func CheckStatusCode(t *testing.T, resp *http.Response, expected int) {
-	assert.Equal(t, expected, resp.StatusCode)
-	if resp.StatusCode != expected {
-		buf, err := ioutil.ReadAll(resp.Body)
-		assert.Nil(t, err)
-		resp.Body = ioutil.NopCloser(bytes.NewBuffer(buf))
-		fmt.Printf("\n\nERROR unexpected HTML Response: %v\n\n", string(buf))
-	}
 }
 
 func WaitForJobRunToComplete(
@@ -392,46 +417,59 @@ func WaitForJobRunToComplete(
 	store *store.Store,
 	jr models.JobRun,
 ) models.JobRun {
-	return WaitForJobRunStatus(t, store, jr, models.StatusCompleted)
+	return WaitForJobRunStatus(t, store, jr, models.RunStatusCompleted)
 }
 
-func WaitForJobRunToPend(
+func WaitForJobRunToPendBridge(
 	t *testing.T,
 	store *store.Store,
 	jr models.JobRun,
 ) models.JobRun {
-	return WaitForJobRunStatus(t, store, jr, models.StatusPending)
+	return WaitForJobRunStatus(t, store, jr, models.RunStatusPendingBridge)
+}
+
+func WaitForJobRunToPendConfirmations(
+	t *testing.T,
+	store *store.Store,
+	jr models.JobRun,
+) models.JobRun {
+	return WaitForJobRunStatus(t, store, jr, models.RunStatusPendingConfirmations)
 }
 
 func WaitForJobRunStatus(
 	t *testing.T,
 	store *store.Store,
 	jr models.JobRun,
-	status string,
+	status models.RunStatus,
 ) models.JobRun {
 	t.Helper()
-	gomega.NewGomegaWithT(t).Eventually(func() string {
+	gomega.NewGomegaWithT(t).Eventually(func() models.RunStatus {
 		assert.Nil(t, store.One("ID", jr.ID, &jr))
 		return jr.Status
 	}).Should(gomega.Equal(status))
 	return jr
 }
 
-func StringToRunLogData(str string) hexutil.Bytes {
-	length := len([]byte(str))
-	lenHex := utils.RemoveHexPrefix(hexutil.EncodeUint64(uint64(length)))
-	if len(lenHex) < 64 {
-		lenHex = strings.Repeat("0", 64-len(lenHex)) + lenHex
-	}
+func JobRunStays(
+	t *testing.T,
+	store *store.Store,
+	jr models.JobRun,
+	status models.RunStatus,
+) models.JobRun {
+	t.Helper()
+	gomega.NewGomegaWithT(t).Consistently(func() models.RunStatus {
+		assert.Nil(t, store.One("ID", jr.ID, &jr))
+		return jr.Status
+	}).Should(gomega.Equal(status))
+	return jr
+}
 
-	data := utils.RemoveHexPrefix(utils.StringToHex(str))
-	prefix := "0x0000000000000000000000000000000000000000000000000000000000000020"
-
-	var endPad string
-	if length%32 != 0 {
-		endPad = strings.Repeat("00", (32 - (length % 32)))
-	}
-	return hexutil.MustDecode(prefix + lenHex + data + endPad)
+func JobRunStaysPendingConfirmations(
+	t *testing.T,
+	store *store.Store,
+	jr models.JobRun,
+) models.JobRun {
+	return JobRunStays(t, store, jr, models.RunStatusPendingConfirmations)
 }
 
 func WaitForRuns(t *testing.T, j models.JobSpec, store *store.Store, want int) []models.JobRun {
@@ -459,7 +497,7 @@ func WaitForRuns(t *testing.T, j models.JobSpec, store *store.Store, want int) [
 func MustParseWebURL(str string) models.WebURL {
 	u, err := url.Parse(str)
 	mustNotErr(err)
-	return models.WebURL{u}
+	return models.WebURL{URL: u}
 }
 
 func ParseISO8601(s string) time.Time {
@@ -476,12 +514,61 @@ func ParseNullableTime(s string) null.Time {
 	return NullableTime(ParseISO8601(s))
 }
 
-func IndexableBlockNumber(n int64) *models.IndexableBlockNumber {
-	return models.NewIndexableBlockNumber(big.NewInt(n))
+func IndexableBlockNumber(val interface{}) *models.IndexableBlockNumber {
+	switch val.(type) {
+	case int:
+		return models.NewIndexableBlockNumber(big.NewInt(int64(val.(int))), NewHash())
+	case uint64:
+		return models.NewIndexableBlockNumber(big.NewInt(int64(val.(uint64))), NewHash())
+	case int64:
+		return models.NewIndexableBlockNumber(big.NewInt(val.(int64)), NewHash())
+	case *big.Int:
+		return models.NewIndexableBlockNumber(val.(*big.Int), NewHash())
+	default:
+		logger.Panicf("Could not convert %v of type %T to IndexableBlockNumber", val, val)
+		return nil
+	}
+}
+
+func NewBlockHeader(number int) *models.BlockHeader {
+	return &models.BlockHeader{Number: BigHexInt(number)}
 }
 
 func mustNotErr(err error) {
 	if err != nil {
 		logger.Panic(err)
+	}
+}
+
+func UnwrapAdapter(wa adapters.AdapterWithMinConfs) adapters.Adapter {
+	return wa.(adapters.MinConfsWrappedAdapter).Adapter
+}
+
+func GetAccountAddress(store *store.Store) common.Address {
+	account, err := store.KeyStore.GetAccount()
+	mustNotErr(err)
+
+	return account.Address
+}
+
+func StringToHash(s string) common.Hash {
+	return common.BytesToHash([]byte(s))
+}
+
+// AssertServerResponse is used to match against a client response, will print
+// any errors returned if the request fails.
+func AssertServerResponse(t *testing.T, resp *http.Response, expectedStatusCode int) {
+	if resp.StatusCode == expectedStatusCode {
+		return
+	}
+
+	if resp.StatusCode >= 300 && resp.StatusCode < 600 {
+		var result map[string][]string
+		err := json.Unmarshal(ParseResponseBody(resp), &result)
+		mustNotErr(err)
+
+		assert.FailNowf(t, "Request failed", "Expected %d response, got %d with errors: %s", expectedStatusCode, resp.StatusCode, result["errors"])
+	} else {
+		assert.FailNowf(t, "Unexpected response", "Expected %d response, got %d", expectedStatusCode, resp.StatusCode)
 	}
 }

@@ -2,9 +2,11 @@ package models_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/smartcontractkit/chainlink/internal/cltest"
 	"github.com/smartcontractkit/chainlink/services"
 	"github.com/smartcontractkit/chainlink/store/models"
@@ -19,8 +21,8 @@ func TestJobRuns_RetrievingFromDBWithError(t *testing.T) {
 	store, cleanup := cltest.NewStore()
 	defer cleanup()
 
-	job := models.NewJob()
-	jr := job.NewRun()
+	job, initr := cltest.NewJobWithWebInitiator()
+	jr := job.NewRun(initr)
 	jr.Result = cltest.RunResultWithError(fmt.Errorf("bad idea"))
 	err := store.Save(&jr)
 	assert.Nil(t, err)
@@ -37,19 +39,51 @@ func TestJobRun_UnfinishedTaskRuns(t *testing.T) {
 	store, cleanup := cltest.NewStore()
 	defer cleanup()
 
-	j := models.NewJob()
+	j, i := cltest.NewJobWithWebInitiator()
 	j.Tasks = []models.TaskSpec{
 		{Type: "NoOp"},
 		{Type: "NoOpPend"},
 		{Type: "NoOp"},
 	}
 	assert.Nil(t, store.SaveJob(&j))
-	jr := j.NewRun()
+	jr := j.NewRun(i)
 	assert.Equal(t, jr.TaskRuns, jr.UnfinishedTaskRuns())
 
 	jr, err := services.ExecuteRun(jr, store, models.RunResult{})
 	assert.Nil(t, err)
 	assert.Equal(t, jr.TaskRuns[1:], jr.UnfinishedTaskRuns())
+}
+
+func TestTaskRun_Runnable(t *testing.T) {
+	t.Parallel()
+
+	job, initr := cltest.NewJobWithLogInitiator()
+	tests := []struct {
+		name                 string
+		creationHeight       *hexutil.Big
+		currentHeight        *models.IndexableBlockNumber
+		minimumConfirmations uint64
+		want                 bool
+	}{
+		{"creation nil current nil minconfs 0", nil, nil, 0, true},
+		{"creation 1 current nil minconfs 0", cltest.NewBigHexInt(1), nil, 0, true},
+		{"creation 1 current 1 minconfs 0", cltest.NewBigHexInt(1), cltest.IndexableBlockNumber(1), 0, true},
+		{"creation 1 current 1 minconfs 1", cltest.NewBigHexInt(1), cltest.IndexableBlockNumber(1), 1, true},
+		{"creation 1 current 2 minconfs 1", cltest.NewBigHexInt(1), cltest.IndexableBlockNumber(2), 1, true},
+		{"creation 1 current 2 minconfs 2", cltest.NewBigHexInt(1), cltest.IndexableBlockNumber(2), 2, true},
+		{"creation 1 current 2 minconfs 3", cltest.NewBigHexInt(1), cltest.IndexableBlockNumber(2), 3, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			jr := job.NewRun(initr)
+			if test.creationHeight != nil {
+				jr.CreationHeight = test.creationHeight
+			}
+
+			assert.Equal(t, test.want, jr.Runnable(test.currentHeight, test.minimumConfirmations))
+		})
+	}
 }
 
 func TestTaskRun_Merge(t *testing.T) {
@@ -74,7 +108,7 @@ func TestTaskRun_Merge(t *testing.T) {
 			orig := `{"url":"https://OLD.example.com/api"}`
 			tr := models.TaskRun{
 				Task: models.TaskSpec{
-					Params: models.JSON{gjson.Parse(orig)},
+					Params: models.JSON{Result: gjson.Parse(orig)},
 					Type:   "httpget",
 				},
 			}
@@ -118,8 +152,25 @@ func TestRunResult_Value(t *testing.T) {
 	}
 }
 
+func TestRunResult_WithError(t *testing.T) {
+	t.Parallel()
+
+	rr := models.RunResult{}
+
+	assert.Equal(t, models.RunStatusUnstarted, rr.Status)
+
+	rr = rr.WithError(errors.New("this blew up"))
+
+	assert.Equal(t, models.RunStatusErrored, rr.Status)
+	assert.Equal(t, cltest.NullString("this blew up"), rr.ErrorMessage)
+}
+
 func TestRunResult_Merge(t *testing.T) {
 	t.Parallel()
+
+	inProgress := models.RunStatusInProgress
+	pending := models.RunStatusPendingBridge
+	errored := models.RunStatusErrored
 
 	nullString := cltest.NullString(nil)
 	jrID := utils.NewBytes32ID()
@@ -127,61 +178,61 @@ func TestRunResult_Merge(t *testing.T) {
 		name             string
 		originalData     string
 		originalError    null.String
-		originalPending  bool
+		originalStatus   models.RunStatus
 		originalJRID     string
 		inData           string
 		inError          null.String
-		inPending        bool
+		inStatus         models.RunStatus
 		inJRID           string
 		wantData         string
 		wantErrorMessage null.String
-		wantPending      bool
+		wantStatus       models.RunStatus
 		wantJRID         string
 		wantErrored      bool
 	}{
 		{"merging data",
-			`{"value":"old&busted","unique":"1"}`, nullString, false, jrID,
-			`{"value":"newHotness","and":"!"}`, nullString, false, jrID,
-			`{"value":"newHotness","unique":"1","and":"!"}`, nullString, false, jrID, false},
+			`{"value":"old&busted","unique":"1"}`, nullString, inProgress, jrID,
+			`{"value":"newHotness","and":"!"}`, nullString, inProgress, jrID,
+			`{"value":"newHotness","unique":"1","and":"!"}`, nullString, inProgress, jrID, false},
 		{"original error throws",
-			`{"value":"old"}`, cltest.NullString("old problem"), false, jrID,
-			`{}`, nullString, false, jrID,
-			`{"value":"old"}`, cltest.NullString("old problem"), false, jrID, true},
+			`{"value":"old"}`, cltest.NullString("old problem"), errored, jrID,
+			`{}`, nullString, inProgress, jrID,
+			`{"value":"old"}`, cltest.NullString("old problem"), errored, jrID, true},
 		{"error override",
-			`{"value":"old"}`, nullString, false, jrID,
-			`{}`, cltest.NullString("new problem"), false, jrID,
-			`{"value":"old"}`, cltest.NullString("new problem"), false, jrID, false},
+			`{"value":"old"}`, nullString, inProgress, jrID,
+			`{}`, cltest.NullString("new problem"), errored, jrID,
+			`{"value":"old"}`, cltest.NullString("new problem"), errored, jrID, false},
 		{"original job run ID",
-			`{"value":"old"}`, nullString, false, jrID,
-			`{}`, nullString, false, "",
-			`{"value":"old"}`, nullString, false, jrID, false},
+			`{"value":"old"}`, nullString, inProgress, jrID,
+			`{}`, nullString, inProgress, "",
+			`{"value":"old"}`, nullString, inProgress, jrID, false},
 		{"job run ID override",
-			`{"value":"old"}`, nullString, false, utils.NewBytes32ID(),
-			`{}`, nullString, false, jrID,
-			`{"value":"old"}`, nullString, false, jrID, false},
+			`{"value":"old"}`, nullString, inProgress, utils.NewBytes32ID(),
+			`{}`, nullString, inProgress, jrID,
+			`{"value":"old"}`, nullString, inProgress, jrID, false},
 		{"original pending",
-			`{"value":"old"}`, nullString, true, jrID,
-			`{}`, nullString, false, jrID,
-			`{"value":"old"}`, nullString, true, jrID, false},
+			`{"value":"old"}`, nullString, pending, jrID,
+			`{}`, nullString, inProgress, jrID,
+			`{"value":"old"}`, nullString, pending, jrID, false},
 		{"pending override",
-			`{"value":"old"}`, nullString, false, jrID,
-			`{}`, nullString, true, jrID,
-			`{"value":"old"}`, nullString, true, jrID, false},
+			`{"value":"old"}`, nullString, inProgress, jrID,
+			`{}`, nullString, pending, jrID,
+			`{"value":"old"}`, nullString, pending, jrID, false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			original := models.RunResult{
-				Data:         models.JSON{gjson.Parse(test.originalData)},
+				Data:         models.JSON{Result: gjson.Parse(test.originalData)},
 				ErrorMessage: test.originalError,
 				JobRunID:     test.originalJRID,
-				Pending:      test.originalPending,
+				Status:       test.originalStatus,
 			}
 			in := models.RunResult{
 				Data:         cltest.JSONFromString(test.inData),
 				ErrorMessage: test.inError,
 				JobRunID:     test.inJRID,
-				Pending:      test.inPending,
+				Status:       test.inStatus,
 			}
 			merged, err := original.Merge(in)
 			assert.Equal(t, test.wantErrored, err != nil)
@@ -189,17 +240,17 @@ func TestRunResult_Merge(t *testing.T) {
 			assert.JSONEq(t, test.originalData, original.Data.String())
 			assert.Equal(t, test.originalError, original.ErrorMessage)
 			assert.Equal(t, test.originalJRID, original.JobRunID)
-			assert.Equal(t, test.originalPending, original.Pending)
+			assert.Equal(t, test.originalStatus, original.Status)
 
 			assert.JSONEq(t, test.inData, in.Data.String())
 			assert.Equal(t, test.inError, in.ErrorMessage)
 			assert.Equal(t, test.inJRID, in.JobRunID)
-			assert.Equal(t, test.inPending, in.Pending)
+			assert.Equal(t, test.inStatus, in.Status)
 
 			assert.JSONEq(t, test.wantData, merged.Data.String())
 			assert.Equal(t, test.wantErrorMessage, merged.ErrorMessage)
 			assert.Equal(t, test.wantJRID, merged.JobRunID)
-			assert.Equal(t, test.wantPending, merged.Pending)
+			assert.Equal(t, test.wantStatus, merged.Status)
 		})
 	}
 }
