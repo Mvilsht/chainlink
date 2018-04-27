@@ -1,0 +1,10 @@
+#!/bin/bash
+
+set -e
+
+cd solidity
+./node_modules/.bin/truffle test --network test
+
+cd ../examples/uptime_sla
+yarn install
+./node_modules/.bin/truffle test --network test

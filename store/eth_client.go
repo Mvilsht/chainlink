@@ -35,6 +35,7 @@ func (eth *EthClient) GetNonce(address common.Address) (uint64, error) {
 	return utils.HexToUint64(result)
 }
 
+// GetWeiBalance returns the balance of the given address in Wei.
 func (eth *EthClient) GetWeiBalance(address common.Address) (*big.Int, error) {
 	result := ""
 	numWeiBigInt := new(big.Int)
@@ -46,14 +47,16 @@ func (eth *EthClient) GetWeiBalance(address common.Address) (*big.Int, error) {
 	return numWeiBigInt, nil
 }
 
-func (eth *EthClient) GetEthBalance(address common.Address) (float64, error) {
+// GetEthBalance returns the balance of the given addresses in Ether.
+func (eth *EthClient) GetEthBalance(address common.Address) (*big.Rat, error) {
 	numWei, err := eth.GetWeiBalance(address)
 	if err != nil {
-		return 0, err
+		return new(big.Rat).SetInt64(0), err
 	}
 	return utils.WeiToEth(numWei), nil
 }
 
+// GetERC20Balance returns the balance of the given address for the token contract address.
 func (eth *EthClient) GetERC20Balance(address common.Address, contractAddress common.Address) (*big.Int, error) {
 	type callArgs struct {
 		To   common.Address `json:"to"`

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/smartcontractkit/chainlink/store/models"
@@ -45,6 +46,8 @@ func (rt RendererTable) Render(v interface{}) error {
 		rt.renderJobs(*typed)
 	case *presenters.JobSpec:
 		rt.renderJob(*typed)
+	case *models.BridgeType:
+		rt.renderBridge(*typed)
 	default:
 		return fmt.Errorf("Unable to render object: %v", typed)
 	}
@@ -74,13 +77,25 @@ func render(name string, table *tablewriter.Table) {
 }
 
 func jobRowToStrings(job models.JobSpec) []string {
-	p := presenters.JobSpec{job, nil}
+	p := presenters.JobSpec{JobSpec: job, Runs: nil}
 	return []string{
 		p.ID,
 		p.FriendlyCreatedAt(),
 		p.FriendlyInitiators(),
 		p.FriendlyTasks(),
 	}
+}
+
+func (rt RendererTable) renderBridge(bridge models.BridgeType) error {
+	table := tablewriter.NewWriter(rt)
+	table.SetHeader([]string{"Name", "URL", "DefaultConfirmations"})
+	table.Append([]string{
+		bridge.Name,
+		bridge.URL.String(),
+		strconv.FormatUint(bridge.DefaultConfirmations, 10),
+	})
+	render("Bridge", table)
+	return nil
 }
 
 func (rt RendererTable) renderJob(job presenters.JobSpec) error {
@@ -120,7 +135,7 @@ func (rt RendererTable) renderJobInitiators(j presenters.JobSpec) error {
 	table := tablewriter.NewWriter(rt)
 	table.SetHeader([]string{"Type", "Schedule", "Run At", "Address"})
 	for _, i := range j.Initiators {
-		p := presenters.Initiator{i}
+		p := presenters.Initiator{Initiator: i}
 		table.Append([]string{
 			p.Type,
 			p.Schedule.String(),
@@ -137,7 +152,7 @@ func (rt RendererTable) renderJobTasks(j presenters.JobSpec) error {
 	table := tablewriter.NewWriter(rt)
 	table.SetHeader([]string{"Type", "Config", "Value"})
 	for _, t := range j.Tasks {
-		p := presenters.TaskSpec{t}
+		p := presenters.TaskSpec{TaskSpec: t}
 		keys, values := p.FriendlyParams()
 		table.Append([]string{p.Type, keys, values})
 	}
@@ -152,7 +167,7 @@ func (rt RendererTable) renderJobRuns(j presenters.JobSpec) error {
 	for _, jr := range j.Runs {
 		table.Append([]string{
 			jr.ID,
-			jr.Status,
+			string(jr.Status),
 			utils.ISO8601UTC(jr.CreatedAt),
 			utils.NullISO8601UTC(jr.CompletedAt),
 			jr.Result.Data.String(),

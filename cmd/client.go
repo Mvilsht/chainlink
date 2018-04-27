@@ -4,10 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/manyminds/api2go/jsonapi"
 	"github.com/mitchellh/go-homedir"
 	"github.com/smartcontractkit/chainlink/logger"
 	"github.com/smartcontractkit/chainlink/services"
@@ -34,11 +41,11 @@ type Client struct {
 
 // RunNode starts the Chainlink core.
 func (cli *Client) RunNode(c *clipkg.Context) error {
-	if c.Bool("debug") {
-		cli.Config.LogLevel = strpkg.LogLevel{zapcore.DebugLevel}
-	}
+	config := updateConfig(cli.Config, c.Bool("debug"))
+	logger.SetLogger(config.CreateProductionLogger())
 	logger.Infow("Starting Chainlink Node " + strpkg.Version + " at commit " + strpkg.Sha)
-	app := cli.AppFactory.NewApplication(cli.Config)
+
+	app := cli.AppFactory.NewApplication(config)
 	store := app.GetStore()
 	cli.Auth.Authenticate(store, c.String("password"))
 	if err := app.Start(); err != nil {
@@ -47,6 +54,13 @@ func (cli *Client) RunNode(c *clipkg.Context) error {
 	defer app.Stop()
 	logNodeBalance(store)
 	return cli.errorOut(cli.Runner.Run(app))
+}
+
+func updateConfig(config strpkg.Config, debug bool) strpkg.Config {
+	if debug {
+		config.LogLevel = strpkg.LogLevel{Level: zapcore.DebugLevel}
+	}
+	return config
 }
 
 func logNodeBalance(store *strpkg.Store) {
@@ -74,41 +88,62 @@ func (cli *Client) ShowJobSpec(c *clipkg.Context) error {
 	}
 	defer resp.Body.Close()
 	var job presenters.JobSpec
-	return cli.deserializeResponse(resp, &job)
+	return cli.renderResponse(resp, &job)
 }
 
-// GetJobSpecs returns all job specs.
-func (cli *Client) GetJobSpecs(c *clipkg.Context) error {
+func (cli *Client) getPageOfJobSpecs(requestURI string, page int, jobs *[]models.JobSpec, links *jsonapi.Links) error {
 	cfg := cli.Config
-	resp, err := utils.BasicAuthGet(
-		cfg.BasicAuthUsername,
-		cfg.BasicAuthPassword,
-		cfg.ClientNodeURL+"/v2/specs",
-	)
+
+	uri, err := url.Parse(requestURI)
+	if err != nil {
+		return err
+	}
+	q := uri.Query()
+	if page > 0 {
+		q.Set("page", strconv.Itoa(page))
+	}
+	uri.RawQuery = q.Encode()
+
+	resp, err := utils.BasicAuthGet(cfg.BasicAuthUsername, cfg.BasicAuthPassword, uri.String())
 	if err != nil {
 		return cli.errorOut(err)
 	}
 	defer resp.Body.Close()
 
+	return cli.deserializeAPIResponse(resp, jobs, links)
+}
+
+// GetJobSpecs returns all job specs.
+func (cli *Client) GetJobSpecs(c *clipkg.Context) error {
+	cfg := cli.Config
+	requestURI := cfg.ClientNodeURL + "/v2/specs"
+
+	page := 0
+	if c != nil && c.IsSet("page") {
+		page = c.Int("page")
+	}
+
+	var links jsonapi.Links
 	var jobs []models.JobSpec
-	return cli.deserializeResponse(resp, &jobs)
+	err := cli.getPageOfJobSpecs(requestURI, page, &jobs, &links)
+	if err != nil {
+		return err
+	}
+	return cli.errorOut(cli.Render(&jobs))
 }
 
 // CreateJobSpec creates job spec based on JSON input
 func (cli *Client) CreateJobSpec(c *clipkg.Context) error {
 	cfg := cli.Config
-	errjs := errors.New("Must pass in JSON or filepath")
 	if !c.Args().Present() {
-		return cli.errorOut(errjs)
+		return cli.errorOut(errors.New("Must pass in JSON or filepath"))
 	}
-	arg := c.Args().First()
-	var buf *bytes.Buffer
-	var err error
-	if gjson.Valid(arg) {
-		buf = bytes.NewBufferString(arg)
-	} else if buf, err = fromFile(arg, cli); err != nil {
-		return cli.errorOut(multierr.Append(errjs, err))
+
+	buf, err := getBufferFromJSON(c.Args().First())
+	if err != nil {
+		return cli.errorOut(err)
 	}
+
 	resp, err := utils.BasicAuthPost(
 		cfg.BasicAuthUsername,
 		cfg.BasicAuthPassword,
@@ -122,10 +157,160 @@ func (cli *Client) CreateJobSpec(c *clipkg.Context) error {
 	defer resp.Body.Close()
 
 	var jobs presenters.JobSpec
-	return cli.deserializeResponse(resp, &jobs)
+	return cli.renderResponse(resp, &jobs)
 }
 
-func fromFile(arg string, cli *Client) (*bytes.Buffer, error) {
+// CreateJobRun creates job run based on SpecID and optional JSON
+func (cli *Client) CreateJobRun(c *clipkg.Context) error {
+	cfg := cli.Config
+	if !c.Args().Present() {
+		return cli.errorOut(errors.New("Must pass in SpecID [JSON blob | JSON filepath]"))
+	}
+
+	buf := bytes.NewBufferString("")
+	if c.NArg() > 1 {
+		jbuf, err := getBufferFromJSON(c.Args().Get(1))
+		if err != nil {
+			return cli.errorOut(err)
+		}
+		buf = jbuf
+	}
+
+	resp, err := utils.BasicAuthPost(
+		cfg.BasicAuthUsername,
+		cfg.BasicAuthPassword,
+		cfg.ClientNodeURL+"/v2/specs/"+c.Args().First()+"/runs",
+		"application/json",
+		buf,
+	)
+	if err != nil {
+		return cli.errorOut(err)
+	}
+	defer resp.Body.Close()
+	var jobs presenters.JobSpec
+	return cli.renderResponse(resp, &jobs)
+}
+
+// BackupDatabase streams a backup of the node's db to the passed filepath.
+func (cli *Client) BackupDatabase(c *clipkg.Context) error {
+	cfg := cli.Config
+	if !c.Args().Present() {
+		return cli.errorOut(errors.New("Must pass the path to save the backup"))
+	}
+	resp, err := utils.BasicAuthGet(
+		cfg.BasicAuthUsername,
+		cfg.BasicAuthPassword,
+		cfg.ClientNodeURL+"/v2/backup",
+	)
+	if err != nil {
+		return cli.errorOut(err)
+	}
+	defer resp.Body.Close()
+	return cli.errorOut(saveBodyAsFile(resp, c.Args().First()))
+}
+
+// ImportKey imports a key to be used with the chainlink node
+func (cli *Client) ImportKey(c *clipkg.Context) error {
+	cfg := cli.Config
+	if !c.Args().Present() {
+		return cli.errorOut(errors.New("Must pass in filepath to key"))
+	}
+
+	src := c.Args().First()
+	kdir := cfg.KeysDir()
+
+	if e, err := isDirEmpty(kdir); !e && err != nil {
+		return cli.errorOut(err)
+	}
+
+	if i := strings.LastIndex(src, "/"); i < 0 {
+		kdir += "/" + src
+	} else {
+		kdir += src[strings.LastIndex(src, "/"):]
+	}
+	return cli.errorOut(copyFile(src, kdir))
+}
+
+// AddBridge adds a new bridge to the chainlink node
+func (cli *Client) AddBridge(c *clipkg.Context) error {
+	cfg := cli.Config
+	if !c.Args().Present() {
+		return cli.errorOut(errors.New("Must pass in the bridge's parameters [JSON blob | JSON filepath]"))
+	}
+
+	buf, err := getBufferFromJSON(c.Args().First())
+	if err != nil {
+		return cli.errorOut(err)
+	}
+
+	resp, err := utils.BasicAuthPost(
+		cfg.BasicAuthUsername,
+		cfg.BasicAuthPassword,
+		cfg.ClientNodeURL+"/v2/bridge_types",
+		"application/json",
+		buf,
+	)
+	if err != nil {
+		return cli.errorOut(err)
+	}
+	defer resp.Body.Close()
+
+	var bridge models.BridgeType
+	return cli.deserializeResponse(resp, &bridge)
+}
+
+func isDirEmpty(dir string) (bool, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	if _, err = f.Readdirnames(1); err == io.EOF {
+		return true, nil
+	}
+
+	return false, fmt.Errorf("Account already present in keystore: %s", dir)
+}
+
+func copyFile(src, dst string) error {
+	from, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer from.Close()
+
+	to, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer to.Close()
+
+	_, err = io.Copy(to, from)
+
+	return err
+}
+
+func saveBodyAsFile(resp *http.Response, dst string) error {
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func getBufferFromJSON(s string) (buf *bytes.Buffer, err error) {
+	if gjson.Valid(s) {
+		buf, err = bytes.NewBufferString(s), nil
+	} else if buf, err = fromFile(s); err != nil {
+		buf, err = nil, multierr.Append(errors.New("Must pass in JSON or filepath"), err)
+	}
+	return
+}
+
+func fromFile(arg string) (*bytes.Buffer, error) {
 	dir, err := homedir.Expand(arg)
 	if err != nil {
 		return nil, err
@@ -137,6 +322,21 @@ func fromFile(arg string, cli *Client) (*bytes.Buffer, error) {
 	return bytes.NewBuffer(file), nil
 }
 
+// deserializeAPIResponse is distinct from deserializeResponse in that it supports JSONAPI responses with Links
+func (cli *Client) deserializeAPIResponse(resp *http.Response, dst interface{}, links *jsonapi.Links) error {
+	if resp.StatusCode >= 400 {
+		return cli.errorOut(errors.New(resp.Status))
+	}
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return cli.errorOut(err)
+	}
+	if err = web.ParsePaginatedResponse(b, dst, links); err != nil {
+		return cli.errorOut(err)
+	}
+	return nil
+}
+
 func (cli *Client) deserializeResponse(resp *http.Response, dst interface{}) error {
 	if resp.StatusCode >= 400 {
 		return cli.errorOut(errors.New(resp.Status))
@@ -146,6 +346,14 @@ func (cli *Client) deserializeResponse(resp *http.Response, dst interface{}) err
 		return cli.errorOut(err)
 	}
 	if err = json.Unmarshal(b, &dst); err != nil {
+		return cli.errorOut(err)
+	}
+	return nil
+}
+
+func (cli *Client) renderResponse(resp *http.Response, dst interface{}) error {
+	err := cli.deserializeResponse(resp, dst)
+	if err != nil {
 		return cli.errorOut(err)
 	}
 	return cli.errorOut(cli.Render(dst))

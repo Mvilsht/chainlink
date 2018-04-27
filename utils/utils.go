@@ -9,12 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"math/big"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -28,15 +27,17 @@ import (
 
 const (
 	HUMAN_TIME_FORMAT = "2006-01-02 15:04:05 MST"
-	weiPerEth         = 1e18
 	EVMWordByteLen    = 32
 	EVMWordHexLen     = EVMWordByteLen * 2
 )
+
+var weiPerEth = big.NewInt(1e18)
 
 // ZeroAddress is an empty address, otherwise in Ethereum as
 // 0x0000000000000000000000000000000000000000
 var ZeroAddress = common.Address{}
 
+// WithoutZeroAddresses returns a list of addresses excluding the zero address.
 func WithoutZeroAddresses(addresses []common.Address) []common.Address {
 	var withoutZeros []common.Address
 	for _, address := range addresses {
@@ -47,6 +48,7 @@ func WithoutZeroAddresses(addresses []common.Address) []common.Address {
 	return withoutZeros
 }
 
+// HexToUint64 converts a given hex string to 64-bit unsigned integer.
 func HexToUint64(hex string) (uint64, error) {
 	return strconv.ParseUint(RemoveHexPrefix(hex), 16, 64)
 }
@@ -66,10 +68,12 @@ func EncodeTxToHex(tx *types.Transaction) (string, error) {
 	return common.ToHex(rlp.Bytes()), nil
 }
 
+// ISO8601UTC formats given time to ISO8601.
 func ISO8601UTC(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// NullISO8601UTC returns formatted time if valid, empty string otherwise.
 func NullISO8601UTC(t null.Time) string {
 	if t.Valid {
 		return ISO8601UTC(t.Time)
@@ -153,6 +157,7 @@ func HexConcat(strs ...string) string {
 	return hex
 }
 
+// RemoveHexPrefix removes the prefix (0x) of a given hex string.
 func RemoveHexPrefix(str string) string {
 	if len(str) > 1 && strings.ToLower(str[0:2]) == "0x" {
 		return str[2:]
@@ -172,19 +177,14 @@ func DecodeEthereumTx(hex string) (types.Transaction, error) {
 }
 
 // WeiToEth converts wei amounts to ether.
-func WeiToEth(numWei *big.Int) float64 {
-	numWeiBigFloat := new(big.Float).SetInt(numWei)
-	weiPerEthBigFloat := new(big.Float).SetFloat64(weiPerEth)
-	numEthBigFloat := new(big.Float)
-	numEthBigFloat.Quo(numWeiBigFloat, weiPerEthBigFloat)
-	numEthFloat64, _ := numEthBigFloat.Float64()
-	return numEthFloat64
+func WeiToEth(numWei *big.Int) *big.Rat {
+	return new(big.Rat).SetFrac(numWei, weiPerEth)
 }
 
 // EthToWei converts ether amounts to wei.
 func EthToWei(numEth float64) *big.Int {
 	numEthBigFloat := new(big.Float).SetFloat64(numEth)
-	weiPerEthBigFloat := new(big.Float).SetFloat64(weiPerEth)
+	weiPerEthBigFloat := new(big.Float).SetInt(weiPerEth)
 	numWeiBigFloat := new(big.Float)
 	numWeiBigFloat.Mul(weiPerEthBigFloat, numEthBigFloat)
 	numWeiBigInt, _ := numWeiBigFloat.Int(nil)
@@ -206,6 +206,7 @@ func StringToHex(in string) string {
 	return AddHexPrefix(hex.EncodeToString([]byte(in)))
 }
 
+// AddHexPrefix adds the previx (0x) to a given hex string.
 func AddHexPrefix(str string) string {
 	if len(str) < 2 || len(str) > 1 && strings.ToLower(str[0:2]) != "0x" {
 		str = "0x" + str
@@ -219,7 +220,7 @@ func HexToString(hex string) (string, error) {
 	return string(b), err
 }
 
-// Returns a struct that encapsulates desired arguments used to filter
+// ToFilterQueryFor returns a struct that encapsulates desired arguments used to filter
 // event logs.
 func ToFilterQueryFor(fromBlock *big.Int, addresses []common.Address) ethereum.FilterQuery {
 	return ethereum.FilterQuery{
@@ -249,16 +250,21 @@ func toBlockNumArg(number *big.Int) string {
 	return hexutil.EncodeBig(number)
 }
 
+// Sleeper interface is used for tasks that need to be done on some
+// interval, excluding Cron, like reconnecting.
 type Sleeper interface {
 	Reset()
 	Sleep()
 	Duration() time.Duration
 }
 
+// BackoffSleeper is a counter to assist with reattempts.
 type BackoffSleeper struct {
 	*backoff.Backoff
 }
 
+// NewBackoffSleeper returns a BackoffSleeper that is configured to
+// sleep for 1 second minimum, and 10 seconds maximum.
 func NewBackoffSleeper() BackoffSleeper {
 	return BackoffSleeper{&backoff.Backoff{
 		Min: 1 * time.Second,
@@ -266,10 +272,46 @@ func NewBackoffSleeper() BackoffSleeper {
 	}}
 }
 
+// Sleep waits for the given duration before reattempting.
 func (bs BackoffSleeper) Sleep() {
 	time.Sleep(bs.Backoff.Duration())
 }
 
+// Duration returns the current duration value.
 func (bs BackoffSleeper) Duration() time.Duration {
 	return bs.ForAttempt(bs.Attempt())
+}
+
+// MaxUint64 finds the maximum value of a list of uint64s.
+func MaxUint64(uints ...uint64) uint64 {
+	var max uint64
+	for _, n := range uints {
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+// EVMHexNumber formats a number as a 32 byte hex string.
+func EVMHexNumber(val interface{}) string {
+	return fmt.Sprintf("0x%064x", val)
+}
+
+// BigRatIsZero checks if a big.Rat is equal to 0.
+func BigRatIsZero(val *big.Rat) bool {
+	zero := new(big.Rat).SetInt64(0)
+	if val.Cmp(zero) == 0 {
+		return true
+	}
+	return false
+}
+
+// BigIntIsZero checks if a big.Int is equal to 0.
+func BigIntIsZero(val *big.Int) bool {
+	zero := new(big.Int).SetInt64(0)
+	if val.Cmp(zero) == 0 {
+		return true
+	}
+	return false
 }

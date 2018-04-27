@@ -1,7 +1,6 @@
 package services_test
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -15,9 +14,7 @@ import (
 func TestServices_RpcLogEvent_RunLogJSON(t *testing.T) {
 	t.Parallel()
 
-	var clData models.JSON
-	clDataFixture := `{"url":"https://etherprice.com/api","path":["recent","usd"],"address":"0x3cCad4715152693fE3BC4460591e3D3Fbd071b42","dataPrefix":"0x0000000000000000000000000000000000000000000000000000000000000001","functionSelector":"76005c26"}`
-	assert.Nil(t, json.Unmarshal([]byte(clDataFixture), &clData))
+	clData := cltest.JSONFromString(`{"url":"https://etherprice.com/api","path":["recent","usd"],"address":"0x3cCad4715152693fE3BC4460591e3D3Fbd071b42","dataPrefix":"0x0000000000000000000000000000000000000000000000000000000000000001","functionSelector":"76005c26"}`)
 
 	hwLog := cltest.LogFromFixture("../internal/fixtures/eth/subscription_logs_hello_world.json")
 	tests := []struct {
@@ -34,6 +31,7 @@ func TestServices_RpcLogEvent_RunLogJSON(t *testing.T) {
 			le := services.RPCLogEvent{Log: test.el}
 			output, err := le.RunLogJSON()
 			assert.JSONEq(t, strings.ToLower(test.wantData.String()), strings.ToLower(output.String()))
+			assert.Nil(t, err)
 			assert.Equal(t, test.wantErrored, (err != nil))
 		})
 	}
@@ -63,14 +61,6 @@ func TestServices_RpcLogEvent_EthLogJSON(t *testing.T) {
 	}
 }
 
-// If updating this test, be sure to update the truffle suite's "expected event signature" test.
-func TestServices_RunLogTopic_ExpectedEventSignature(t *testing.T) {
-	t.Parallel()
-
-	expected := "0x06f4bf36b4e011a5c499cef1113c2d166800ce4013f6c2509cab1a0e92b83fb2"
-	assert.Equal(t, expected, services.RunLogTopic.Hex())
-}
-
 func TestServices_NewRPCLogSubscription_BackfillLogs(t *testing.T) {
 	t.Parallel()
 
@@ -78,8 +68,7 @@ func TestServices_NewRPCLogSubscription_BackfillLogs(t *testing.T) {
 	defer cleanup()
 	eth := cltest.MockEthOnStore(store)
 
-	job := cltest.NewJobWithLogInitiator()
-	initr := job.Initiators[0]
+	job, initr := cltest.NewJobWithLogInitiator()
 	log := cltest.LogFromFixture("../internal/fixtures/eth/subscription_logs.json")
 	eth.Register("eth_getLogs", []types.Log{log})
 	eth.RegisterSubscription("logs")
@@ -102,8 +91,7 @@ func TestServices_NewRPCLogSubscription_BackfillLogs_WithNoHead(t *testing.T) {
 	defer cleanup()
 	eth := cltest.MockEthOnStore(store)
 
-	job := cltest.NewJobWithLogInitiator()
-	initr := job.Initiators[0]
+	job, initr := cltest.NewJobWithLogInitiator()
 	eth.RegisterSubscription("logs")
 
 	count := 0
@@ -123,8 +111,7 @@ func TestServices_NewRPCLogSubscription_PreventsDoubleDispatch(t *testing.T) {
 	defer cleanup()
 	eth := cltest.MockEthOnStore(store)
 
-	job := cltest.NewJobWithLogInitiator()
-	initr := job.Initiators[0]
+	job, initr := cltest.NewJobWithLogInitiator()
 	log := cltest.LogFromFixture("../internal/fixtures/eth/subscription_logs.json")
 	eth.Register("eth_getLogs", []types.Log{log}) // backfill
 	logsChan := make(chan types.Log, 1)

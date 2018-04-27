@@ -1,7 +1,6 @@
 package services
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +28,8 @@ const (
 // RunLogTopic is the signature for the Request(uint256,bytes32,string) event
 // which Chainlink RunLog initiators watch for.
 // See https://github.com/smartcontractkit/chainlink/blob/master/solidity/contracts/Oracle.sol
-var RunLogTopic = common.HexToHash("0x06f4bf36b4e011a5c499cef1113c2d166800ce4013f6c2509cab1a0e92b83fb2")
+// If updating this, be sure to update the truffle suite's "expected event signature" test.
+var RunLogTopic = common.HexToHash("0x3fab86a1207bdcfe3976d0d9df25f263d45ae8d381a60960559771a2b223974d")
 
 // JobSubscription listens to event logs being pushed from the Ethereum Node to a job.
 type JobSubscription struct {
@@ -108,9 +108,9 @@ func NewRPCLogSubscription(
 	sub.errors = make(chan error)
 	sub.logs = make(chan types.Log)
 
-	listenFrom := head.NextNumber()
-	loggerLogListening(initr, listenFrom)
-	q := utils.ToFilterQueryFor(listenFrom.ToInt(), []common.Address{initr.Address})
+	listenFromNumber := head.NextInt()
+	loggerLogListening(initr, listenFromNumber)
+	q := utils.ToFilterQueryFor(listenFromNumber, []common.Address{initr.Address})
 	es, err := store.TxManager.SubscribeToLogs(sub.logs, q)
 	if err != nil {
 		return sub, err
@@ -184,11 +184,11 @@ func StartEthLogSubscription(initr models.Initiator, job models.JobSpec, head *m
 	return NewRPCLogSubscription(initr, job, head, store, receiveEthLog)
 }
 
-func loggerLogListening(initr models.Initiator, number *models.IndexableBlockNumber) {
+func loggerLogListening(initr models.Initiator, blockNumber *big.Int) {
 	msg := fmt.Sprintf(
 		"Listening for %v from block %v for address %v for job %v",
 		initr.Type,
-		number.FriendlyString(),
+		presenters.FriendlyBigInt(blockNumber),
 		presenters.LogListeningAddress(initr.Address),
 		initr.JobID)
 	logger.Infow(msg)
@@ -207,7 +207,7 @@ func receiveRunLog(le RPCLogEvent) {
 		return
 	}
 
-	runJob(le, data)
+	runJob(le, data, le.Initiator)
 }
 
 // Parse the log and run the job specific to this initiator log event.
@@ -219,12 +219,12 @@ func receiveEthLog(le RPCLogEvent) {
 		return
 	}
 
-	runJob(le, data)
+	runJob(le, data, le.Initiator)
 }
 
-func runJob(le RPCLogEvent, data models.JSON) {
+func runJob(le RPCLogEvent, data models.JSON, initr models.Initiator) {
 	input := models.RunResult{Data: data}
-	if _, err := BeginRun(le.Job, le.store, input); err != nil {
+	if _, err := BeginRunAtBlock(le.Job, initr, input, le.store, le.ToIndexableBlockNumber()); err != nil {
 		logger.Errorw(err.Error(), le.ForLogger()...)
 	}
 }
@@ -256,6 +256,12 @@ func (le RPCLogEvent) ToDebug() {
 	logger.Debugw(msg, le.ForLogger()...)
 }
 
+func (le RPCLogEvent) ToIndexableBlockNumber() *models.IndexableBlockNumber {
+	num := new(big.Int)
+	num.SetUint64(le.Log.BlockNumber)
+	return models.NewIndexableBlockNumber(num, le.Log.BlockHash)
+}
+
 // ValidateRunLog returns whether or not the contained log is a RunLog,
 // a specific Chainlink event trigger from smart contracts.
 func (le RPCLogEvent) ValidateRunLog() bool {
@@ -270,11 +276,16 @@ func (le RPCLogEvent) ValidateRunLog() bool {
 		logger.Warnw("Failed to retrieve Job ID from log", le.ForLogger("err", err.Error())...)
 		return false
 	} else if jid != le.Job.ID {
-		logger.Warnw(fmt.Sprintf("Run Log didn't have matching job ID: %v != %v", jid, le.Job.ID), le.ForLogger()...)
+		logger.Debugw(fmt.Sprintf("Run Log didn't have matching job ID: %v != %v", jid, le.Job.ID), le.ForLogger()...)
 		return false
 	}
 	return true
 }
+
+// fulfillDataFunctionID is the signature for the fulfillData(uint256,bytes32) function located in Oracle.sol
+// fulfillDataFunctionID is calculated in the following way: bytes4(keccak256("fulfillData(uint256,bytes32)"))
+// See https://github.com/smartcontractkit/chainlink/blob/master/solidity/contracts/Oracle.sol
+var fulfillDataFunctionID = "76005c26"
 
 // RunLogJSON extracts data from the log's topics and data specific to the format defined
 // by RunLogs.
@@ -295,7 +306,7 @@ func (le RPCLogEvent) RunLogJSON() (models.JSON, error) {
 		return js, err
 	}
 
-	return js.Add("functionSelector", "76005c26")
+	return js.Add("functionSelector", fulfillDataFunctionID)
 }
 
 // EthLogJSON reformats the log as JSON.
@@ -310,10 +321,12 @@ func (le RPCLogEvent) EthLogJSON() (models.JSON, error) {
 }
 
 func decodeABIToJSON(data hexutil.Bytes) (models.JSON, error) {
+	versionSize := 32
 	varLocationSize := 32
 	varLengthSize := 32
-	hex := []byte(string([]byte(data)[varLocationSize+varLengthSize:]))
-	return models.ParseJSON(bytes.TrimRight(hex, "\x00"))
+	prefix := versionSize + varLocationSize + varLengthSize
+	hex := []byte(string([]byte(data)[prefix:]))
+	return models.ParseCBOR(hex)
 }
 
 func isRunLog(log types.Log) bool {

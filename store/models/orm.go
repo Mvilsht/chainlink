@@ -1,14 +1,15 @@
 package models
 
 import (
+	"fmt"
 	"log"
 	"math/big"
-	"path"
 	"reflect"
 	"strings"
 
 	"github.com/asdine/storm"
 	"github.com/asdine/storm/q"
+	bolt "github.com/coreos/bbolt"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/smartcontractkit/chainlink/utils"
@@ -20,8 +21,7 @@ type ORM struct {
 }
 
 // NewORM initializes a new database file at the configured path.
-func NewORM(dir string) *ORM {
-	path := path.Join(dir, "db.bolt")
+func NewORM(path string) *ORM {
 	orm := &ORM{initializeDatabase(path)}
 	orm.migrate()
 	return orm
@@ -34,6 +34,10 @@ func initializeDatabase(path string) *storm.DB {
 	}
 
 	return db
+}
+
+func (orm *ORM) GetBolt() *bolt.DB {
+	return orm.DB.Bolt
 }
 
 // Where fetches multiple objects with "Find" in Storm.
@@ -89,31 +93,46 @@ func (orm *ORM) JobRunsFor(jobID string) ([]JobRun, error) {
 	return runs, err
 }
 
-// SaveJob saves a job to the database.
+// SaveJob saves a job to the database and adds IDs to associated tables.
 func (orm *ORM) SaveJob(job *JobSpec) error {
 	tx, err := orm.Begin(true)
 	if err != nil {
-		return err
+		return fmt.Errorf("error starting transaction: %+v", err)
 	}
 	defer tx.Rollback()
 
-	for i, initr := range job.Initiators {
+	for i := range job.Initiators {
 		job.Initiators[i].JobID = job.ID
-		initr.JobID = job.ID
-		if err := tx.Save(&initr); err != nil {
-			return err
+		if err := tx.Save(&job.Initiators[i]); err != nil {
+			return fmt.Errorf("error saving Job Initiators: %+v", err)
 		}
 	}
 	if err := tx.Save(job); err != nil {
-		return err
+		return fmt.Errorf("error saving job: %+v", err)
 	}
 	return tx.Commit()
 }
 
-// PendingJobRuns returns the JobRuns which have a status of "pending".
-func (orm *ORM) PendingJobRuns() ([]JobRun, error) {
+// SaveCreationHeight stores the JobRun in the database with the given
+// block number.
+func (orm *ORM) SaveCreationHeight(jr JobRun, bn *IndexableBlockNumber) (JobRun, error) {
+	if jr.CreationHeight != nil || bn == nil {
+		return jr, nil
+	}
+
+	dup := bn.Number
+	jr.CreationHeight = &dup
+	return jr, orm.Save(&jr)
+}
+
+// JobRunsWithStatus returns the JobRuns which have the passed statuses.
+func (orm *ORM) JobRunsWithStatus(statuses ...RunStatus) ([]JobRun, error) {
 	runs := []JobRun{}
-	err := orm.Where("Status", StatusPending, &runs)
+	err := orm.Select(q.In("Status", statuses)).Find(&runs)
+	if err == storm.ErrNotFound {
+		return []JobRun{}, nil
+	}
+
 	return runs, err
 }
 
@@ -208,4 +227,40 @@ func (orm *ORM) BridgeTypeFor(name string) (BridgeType, error) {
 	tt := BridgeType{}
 	err := orm.One("Name", strings.ToLower(name), &tt)
 	return tt, err
+}
+
+// MarkRan will set Ran to true for a given initiator
+func (orm *ORM) MarkRan(i *Initiator) error {
+	dbtx, err := orm.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer dbtx.Rollback()
+
+	var ir Initiator
+	if err := orm.One("ID", i.ID, &ir); err != nil {
+		return err
+	}
+
+	if ir.Ran {
+		return fmt.Errorf("Job runner: Initiator: %v cannot run more than once", ir.ID)
+	}
+
+	i.Ran = true
+	if err := dbtx.Save(i); err != nil {
+		return err
+	}
+	return dbtx.Commit()
+}
+
+// DatabaseAccessError is an error that occurs during database access.
+type DatabaseAccessError struct {
+	msg string
+}
+
+func (e *DatabaseAccessError) Error() string { return e.msg }
+
+// NewDatabaseAccessError returns a database access error.
+func NewDatabaseAccessError(msg string) error {
+	return &DatabaseAccessError{msg}
 }

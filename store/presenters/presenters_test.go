@@ -3,6 +3,7 @@ package presenters_test
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sort"
 	"testing"
 	"time"
@@ -29,13 +30,13 @@ func TestPresenterInitiatorHasCorrectKeys(t *testing.T) {
 	}{
 		{MI{Type: models.InitiatorWeb}, []string{"type"}},
 		{MI{Type: models.InitiatorCron, Schedule: models.Cron("* * * * *")}, []string{"type", "schedule"}},
-		{MI{Type: models.InitiatorRunAt, Time: models.Time{now}}, []string{"type", "time", "ran"}},
+		{MI{Type: models.InitiatorRunAt, Time: models.Time{Time: now}}, []string{"type", "time", "ran"}},
 		{MI{Type: models.InitiatorEthLog, Address: address}, []string{"type", "address"}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.i.Type, func(t *testing.T) {
-			j, err := json.Marshal(presenters.Initiator{test.i})
+			j, err := json.Marshal(presenters.Initiator{Initiator: test.i})
 			assert.Nil(t, err)
 
 			var value map[string]interface{}
@@ -82,7 +83,9 @@ func TestPresenterShowEthBalance_WithAccount(t *testing.T) {
 
 	output, err := presenters.ShowEthBalance(app.Store)
 	assert.Nil(t, err)
-	assert.Equal(t, fmt.Sprintf("ETH Balance for %v: 2.56e-16", app.Store.KeyStore.GetAccount().Address.Hex()), output)
+	addr := cltest.GetAccountAddress(app.Store).Hex()
+	want := fmt.Sprintf("ETH Balance for %v: 0.000000000000000256", addr)
+	assert.Equal(t, want, output)
 }
 
 func TestPresenterShowLinkBalance_NoAccount(t *testing.T) {
@@ -101,8 +104,11 @@ func TestPresenterShowLinkBalance_WithEmptyAccount(t *testing.T) {
 	t.Parallel()
 	app, cleanup := cltest.NewApplicationWithKeyStore()
 	defer cleanup()
+
+	ethMock := app.MockEthClient()
+	ethMock.Register("eth_call", "0x00") // 0
+
 	_, err := presenters.ShowLinkBalance(app.Store)
-	fmt.Println(err)
 	assert.NotNil(t, err)
 }
 
@@ -118,5 +124,27 @@ func TestPresenterShowLinkBalance_WithAccount(t *testing.T) {
 
 	output, err := presenters.ShowLinkBalance(app.Store)
 	assert.Nil(t, err)
-	assert.Equal(t, fmt.Sprintf("Link Balance for %v: 2.56e-16", app.Store.KeyStore.GetAccount().Address.Hex()), output)
+
+	addr := cltest.GetAccountAddress(app.Store).Hex()
+	want := fmt.Sprintf("Link Balance for %v: 0.000000000000000256", addr)
+	assert.Equal(t, want, output)
+}
+
+func TestPresenter_FriendlyBigInt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   *big.Int
+		want string
+	}{
+		{big.NewInt(0), "#0 (0x0)"},
+		{big.NewInt(1), "#1 (0x1)"},
+		{big.NewInt(123456), "#123456 (0x1e240)"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.in.String(), func(t *testing.T) {
+			assert.Equal(t, test.want, presenters.FriendlyBigInt(test.in))
+		})
+	}
 }

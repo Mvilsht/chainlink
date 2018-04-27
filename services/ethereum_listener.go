@@ -10,6 +10,7 @@ import (
 	"github.com/smartcontractkit/chainlink/logger"
 	"github.com/smartcontractkit/chainlink/store"
 	"github.com/smartcontractkit/chainlink/store/models"
+	"github.com/smartcontractkit/chainlink/store/presenters"
 	"github.com/smartcontractkit/chainlink/utils"
 	"go.uber.org/multierr"
 )
@@ -76,13 +77,13 @@ func (el *EthereumListener) Disconnect() {
 }
 
 // OnNewHead resumes all pending job runs based on the new head activity.
-func (el *EthereumListener) OnNewHead(_ *models.BlockHeader) {
-	pendingRuns, err := el.Store.PendingJobRuns()
+func (el *EthereumListener) OnNewHead(head *models.BlockHeader) {
+	pendingRuns, err := el.Store.JobRunsWithStatus(models.RunStatusPendingConfirmations)
 	if err != nil {
 		logger.Error(err.Error())
 	}
 	for _, jr := range pendingRuns {
-		if _, err := ExecuteRun(jr, el.Store, models.RunResult{}); err != nil {
+		if _, err := ExecuteRunAtBlock(jr, el.Store, jr.Result, head.ToIndexableBlockNumber()); err != nil {
 			logger.Error(err.Error())
 		}
 	}
@@ -262,20 +263,20 @@ func (ht *HeadTracker) updateBlockHeader() {
 		return
 	}
 
-	bn := header.IndexableBlockNumber()
+	bn := header.ToIndexableBlockNumber()
 	if bn.GreaterThan(ht.LastRecord()) {
-		logger.Debug("Fast forwarding to block header ", bn.FriendlyString())
+		logger.Debug("Fast forwarding to block header ", presenters.FriendlyBigInt(bn.ToInt()))
 		ht.Save(bn)
 	}
 }
 
 func (ht *HeadTracker) listenToNewHeads() {
 	if ht.number != nil {
-		logger.Debug("Tracking logs from last block ", ht.number.FriendlyString(), " with hash ", ht.number.Hash.String())
+		logger.Debug("Tracking logs from last block ", presenters.FriendlyBigInt(ht.number.ToInt()), " with hash ", ht.number.Hash.String())
 	}
 	for header := range ht.headers {
-		number := header.IndexableBlockNumber()
-		logger.Debugw(fmt.Sprintf("Received header %v", number.FriendlyString()), "hash", header.Hash())
+		number := header.ToIndexableBlockNumber()
+		logger.Debugw(fmt.Sprintf("Received header %v with hash %s", presenters.FriendlyBigInt(number.ToInt()), header.Hash().String()), "hash", header.Hash())
 		if err := ht.Save(number); err != nil {
 			logger.Error(err.Error())
 		} else {

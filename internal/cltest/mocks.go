@@ -27,7 +27,7 @@ func (ta *TestApplication) MockEthClient() *EthMock {
 
 func MockEthOnStore(s *store.Store) *EthMock {
 	mock := &EthMock{}
-	eth := &store.EthClient{mock}
+	eth := &store.EthClient{CallerSubscriber: mock}
 	s.TxManager.EthClient = eth
 	return mock
 }
@@ -36,6 +36,10 @@ type EthMock struct {
 	Responses      []MockResponse
 	Subscriptions  []MockSubscription
 	newHeadsCalled bool
+}
+
+func (mock *EthMock) Dial(url string) (store.CallerSubscriber, error) {
+	return mock, nil
 }
 
 func (mock *EthMock) Register(

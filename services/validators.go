@@ -18,6 +18,9 @@ func ValidateJob(j models.JobSpec, store *store.Store) error {
 	if j.StartAt.Valid && j.EndAt.Valid && j.StartAt.Time.After(j.EndAt.Time) {
 		merr = multierr.Append(merr, fmtJobError(errors.New("startat cannot be before endat")))
 	}
+	if len(j.Initiators) < 1 || len(j.Tasks) < 1 {
+		merr = multierr.Append(merr, fmtJobError(errors.New("Must have at least one Initiator and one Task")))
+	}
 	for _, i := range j.Initiators {
 		if err := ValidateInitiator(i, j); err != nil {
 			merr = multierr.Append(merr, fmtJobError(err))
@@ -29,6 +32,15 @@ func ValidateJob(j models.JobSpec, store *store.Store) error {
 		}
 	}
 	return merr
+}
+
+// ValidateAdapter checks that the bridge type doesn't have a duplicate name
+func ValidateAdapter(bt *models.BridgeType, store *store.Store) (err error) {
+	ts := models.TaskSpec{Type: bt.Name}
+	if a, _ := adapters.For(ts, store); a != nil {
+		err = fmt.Errorf("adapter validation: adapter %v exists", bt.Name)
+	}
+	return err
 }
 
 func fmtJobError(err error) error {
@@ -80,4 +92,16 @@ func validateTask(task models.TaskSpec, store *store.Store) error {
 		return fmt.Errorf("task validation: %v", err)
 	}
 	return nil
+}
+
+// ValidationError is an error that occurs during validation.
+type ValidationError struct {
+	msg string
+}
+
+func (e *ValidationError) Error() string { return e.msg }
+
+// NewValidationError returns a validation error.
+func NewValidationError(msg string) error {
+	return &ValidationError{msg}
 }

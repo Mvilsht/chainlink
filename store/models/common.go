@@ -10,7 +10,80 @@ import (
 	"github.com/mrwonko/cron"
 	"github.com/smartcontractkit/chainlink/utils"
 	"github.com/tidwall/gjson"
+	"github.com/ugorji/go/codec"
 )
+
+type RunStatus string
+
+const (
+	// RunStatusUnstarted is the default state of any run status.
+	RunStatusUnstarted = RunStatus("")
+	// RunStatusInProgress is used for when a run is actively being executed.
+	RunStatusInProgress = RunStatus("in_progress")
+	// RunStatusPendingConfirmations is used for when a run is awaiting for block confirmations.
+	RunStatusPendingConfirmations = RunStatus("pending_confirmations")
+	// RunStatusPendingBridge is used for when a run is waiting on the completion
+	// of another event.
+	RunStatusPendingBridge = RunStatus("pending_bridge")
+	// RunStatusErrored is used for when a run has errored and will not complete.
+	RunStatusErrored = RunStatus("errored")
+	// RunStatusCompleted is used for when a run has successfully completed execution.
+	RunStatusCompleted = RunStatus("completed")
+)
+
+// PendingBridge returns true if the status is pending_bridge.
+func (s RunStatus) PendingBridge() bool {
+	return s == RunStatusPendingBridge
+}
+
+// PendingConfirmations returns true if the status is pending_confirmations.
+func (s RunStatus) PendingConfirmations() bool {
+	return s == RunStatusPendingConfirmations
+}
+
+// Completed returns true if the status is RunStatusCompleted.
+func (s RunStatus) Completed() bool {
+	return s == RunStatusCompleted
+}
+
+// Errored returns true if the status is RunStatusErrored.
+func (s RunStatus) Errored() bool {
+	return s == RunStatusErrored
+}
+
+// Pending returns true if the status is pending external or confirmations.
+func (s RunStatus) Pending() bool {
+	return s.PendingBridge() || s.PendingConfirmations()
+}
+
+// Finished returns true if the status is final and can't be changed.
+func (s RunStatus) Finished() bool {
+	return s.Completed() || s.Errored()
+}
+
+// Runnable returns true if the status is ready to be run.
+func (s RunStatus) Runnable() bool {
+	return !s.Errored() && !s.Pending()
+}
+
+// ParseCBOR attempts to coerce the input byte array into valid CBOR
+// and then coerces it into a JSON object.
+func ParseCBOR(b []byte) (JSON, error) {
+	var j JSON
+	var m map[string]interface{}
+
+	cbor := codec.NewDecoderBytes(b, new(codec.CborHandle))
+	if err := cbor.Decode(&m); err != nil {
+		return j, err
+	}
+
+	jsb, err := json.Marshal(m)
+	if err != nil {
+		return j, err
+	}
+
+	return j, json.Unmarshal(jsb, &j)
+}
 
 // JSON stores the json types string, number, bool, and null.
 // Arrays and Objects are returned as their raw json types.
@@ -93,6 +166,19 @@ func (j JSON) Add(key string, val interface{}) (JSON, error) {
 	return j.Merge(j2)
 }
 
+// CBOR returns a bytes array of the JSON map or array encoded to CBOR.
+func (j JSON) CBOR() ([]byte, error) {
+	var b []byte
+	cbor := codec.NewEncoderBytes(&b, new(codec.CborHandle))
+
+	switch v := j.Value().(type) {
+	case map[string]interface{}, []interface{}, nil:
+		return b, cbor.Encode(v)
+	default:
+		return b, fmt.Errorf("Unable to coerce JSON to CBOR for type %T", v)
+	}
+}
+
 // WebURL contains the URL of the endpoint.
 type WebURL struct {
 	*url.URL
@@ -119,6 +205,14 @@ func (w *WebURL) MarshalJSON() ([]byte, error) {
 	return json.Marshal(w.String())
 }
 
+// String delegates to the wrapped URL struct or an empty string when it is nil
+func (w *WebURL) String() string {
+	if w.URL == nil {
+		return ""
+	}
+	return w.URL.String()
+}
+
 // Time holds a common field for time.
 type Time struct {
 	time.Time
@@ -128,9 +222,11 @@ type Time struct {
 // data and stores it to the Time field.
 func (t *Time) UnmarshalJSON(b []byte) error {
 	var s string
-	err := json.Unmarshal(b, &s)
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
 	newTime, err := dateparse.ParseAny(s)
-	t.Time = newTime
+	t.Time = newTime.UTC()
 	return err
 }
 

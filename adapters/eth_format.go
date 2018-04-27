@@ -3,12 +3,23 @@ package adapters
 import (
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/smartcontractkit/chainlink/store"
 	"github.com/smartcontractkit/chainlink/store/models"
 	"github.com/smartcontractkit/chainlink/utils"
 )
+
+var evmUint256Max *big.Int
+
+func init() {
+	var ok bool
+	evmUint256Max, ok = (&big.Int{}).SetString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
+	if !ok {
+		panic("could not parse evmUint256Max")
+	}
+}
 
 // EthBytes32 holds no fields.
 type EthBytes32 struct{}
@@ -49,31 +60,26 @@ func (*EthUint256) Perform(input models.RunResult, _ *store.Store) models.RunRes
 		return input.WithError(err)
 	}
 
-	i, ok := (&big.Float{}).SetString(val.String())
+	parts := strings.Split(val.String(), ".")
+	i, ok := (&big.Int{}).SetString(parts[0], 10)
 	if !ok {
-		return input.WithError(fmt.Errorf("cannot parse into big.Float: %v", val.String()))
+		return input.WithError(fmt.Errorf("cannot parse into big.Int: %v", val.String()))
 	}
 
-	b, err := utils.HexToBytes(bigToUintHex(i))
-	if err != nil {
+	if err = validateRange(i); err != nil {
 		return input.WithError(err)
 	}
-	padded := common.LeftPadBytes(b, utils.EVMWordByteLen)
 
-	return input.WithValue(common.ToHex(padded))
+	return input.WithValue(utils.EVMHexNumber(i))
 }
 
-func bigToUintHex(f *big.Float) string {
-	i, _ := f.Int(nil)
+func validateRange(i *big.Int) error {
 	if i.Sign() == -1 {
-		i.Neg(i)
+		return fmt.Errorf("ethUint256: value %v is negative", i.String())
 	}
-	hex := fmt.Sprintf("%x", i)
-	if len(hex)%2 != 0 {
-		hex = "0" + hex
+
+	if evmUint256Max.Cmp(i) == -1 {
+		return fmt.Errorf("ethUint256: value %v too large", i.String())
 	}
-	if len(hex) > utils.EVMWordHexLen {
-		hex = hex[len(hex)-utils.EVMWordHexLen:]
-	}
-	return hex
+	return nil
 }

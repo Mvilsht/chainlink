@@ -5,8 +5,10 @@ package logger
 import (
 	"fmt"
 	"log"
+	"os"
 	"path"
 
+	"github.com/fatih/color"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -18,7 +20,7 @@ func init() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	SetLogger(NewLogger(zl))
+	SetLogger(zl)
 }
 
 // Logger holds a field for the logger interface.
@@ -28,42 +30,52 @@ type Logger struct {
 
 // Write logs a message at the Info level and returns the length
 // of the given bytes.
-func (l *Logger) Write(b []byte) (n int, err error) {
+func (l *Logger) Write(b []byte) (int, error) {
 	l.Info(string(b))
 	return len(b), nil
 }
 
-// NewLogger returns the logger updated with the given Logger.
-func NewLogger(zl *zap.Logger) *Logger {
-	return &Logger{zl.Sugar()}
-}
-
 // SetLogger sets the internal logger to the given input.
-func SetLogger(l *Logger) {
+func SetLogger(zl *zap.Logger) {
 	if logger != nil {
 		defer logger.Sync()
 	}
-	logger = l
+	logger = &Logger{zl.Sugar()}
 }
 
-// Reconfigure creates a new log file at the configured directory
-// with the given LogLevel.
-func Reconfigure(dir string, lvl zapcore.Level) {
-	config := generateConfig(dir)
+// CreateProductionLogger returns a log config for the passed directory
+// with the given LogLevel and customizes stdout for pretty printing.
+func CreateProductionLogger(dir string, lvl zapcore.Level) *zap.Logger {
+	config := zap.NewProductionConfig()
+	destination := path.Join(dir, "log.jsonl")
+	config.OutputPaths = []string{"pretty", destination}
+	config.ErrorOutputPaths = []string{"stderr", destination}
 	config.Level.SetLevel(lvl)
-	zl, err := config.Build(zap.AddCallerSkip(1))
+	zl, err := config.BuildWithSinks(prettyConsoleSinks(os.Stdout), zap.AddCallerSkip(1))
 	if err != nil {
 		log.Fatal(err)
 	}
-	SetLogger(NewLogger(zl))
+	return zl
 }
 
-func generateConfig(dir string) zap.Config {
+// CreateTestLogger creates a logger that directs output to PrettyConsole
+// configured for test output.
+func CreateTestLogger() *zap.Logger {
+	color.NoColor = false
 	config := zap.NewProductionConfig()
-	destination := path.Join(dir, "log.jsonl")
-	config.OutputPaths = []string{"stderr", destination}
-	config.ErrorOutputPaths = []string{"stderr", destination}
-	return config
+	config.Level.SetLevel(zapcore.DebugLevel)
+	config.OutputPaths = []string{"pretty"}
+	zl, err := config.BuildWithSinks(prettyConsoleSinks(os.Stderr), zap.AddCallerSkip(1))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return zl
+}
+
+func prettyConsoleSinks(s zap.Sink) map[string]zap.Sink {
+	factories := zap.DefaultSinks()
+	factories["pretty"] = PrettyConsole{s}
+	return factories
 }
 
 // Infow logs an info message and any additional given information.

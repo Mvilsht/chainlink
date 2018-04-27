@@ -2,6 +2,7 @@ package cltest
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -16,6 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink/services"
 	"github.com/smartcontractkit/chainlink/store"
 	"github.com/smartcontractkit/chainlink/store/models"
+	"github.com/smartcontractkit/chainlink/utils"
 	"github.com/tidwall/gjson"
 	null "gopkg.in/guregu/null.v3"
 )
@@ -40,25 +42,43 @@ func NewTask(taskType string, json ...string) models.TaskSpec {
 	}
 }
 
-func NewJobWithSchedule(sched string) models.JobSpec {
+func NewTaskWithConfirmations(taskType string, confs int, params ...string) models.TaskSpec {
+	task := NewTask(taskType, params...)
+	task.Confirmations = uint64(confs)
+	var err error
+	task.Params, err = task.Params.Add("confirmations", task.Confirmations)
+	mustNotErr(err)
+	return task
+}
+
+func NewJobWithSchedule(sched string) (models.JobSpec, models.Initiator) {
 	j := NewJob()
 	j.Initiators = []models.Initiator{{Type: models.InitiatorCron, Schedule: models.Cron(sched)}}
-	return j
+	return j, j.Initiators[0]
 }
 
-func NewJobWithWebInitiator() models.JobSpec {
+func NewJobWithWebInitiator() (models.JobSpec, models.Initiator) {
 	j := NewJob()
 	j.Initiators = []models.Initiator{{Type: models.InitiatorWeb}}
-	return j
+	return j, j.Initiators[0]
 }
 
-func NewJobWithLogInitiator() models.JobSpec {
+func NewJobWithLogInitiator() (models.JobSpec, models.Initiator) {
 	j := NewJob()
 	j.Initiators = []models.Initiator{{
 		Type:    models.InitiatorEthLog,
 		Address: NewAddress(),
 	}}
-	return j
+	return j, j.Initiators[0]
+}
+
+func NewJobWithRunAtInitiator(t time.Time) (models.JobSpec, models.Initiator) {
+	j := NewJob()
+	j.Initiators = []models.Initiator{{
+		Type: models.InitiatorRunAt,
+		Time: models.Time{Time: t},
+	}}
+	return j, j.Initiators[0]
 }
 
 func NewTx(from common.Address, sentAt uint64) *models.Tx {
@@ -113,10 +133,17 @@ func NewBridgeType(info ...string) models.BridgeType {
 	return bt
 }
 
+func NewBridgeTypeWithDefaultConfirmations(defaultConfirmations uint64, info ...string) models.BridgeType {
+	bt := NewBridgeType(info...)
+	bt.DefaultConfirmations = defaultConfirmations
+
+	return bt
+}
+
 func WebURL(unparsed string) models.WebURL {
 	parsed, err := url.Parse(unparsed)
 	mustNotErr(err)
-	return models.WebURL{parsed}
+	return models.WebURL{URL: parsed}
 }
 
 func NullString(val interface{}) null.String {
@@ -164,16 +191,38 @@ func JSONFromString(body string, args ...interface{}) models.JSON {
 	return j
 }
 
-func NewRunLog(jobID string, addr common.Address, json string) ethtypes.Log {
+func NewRunLog(jobID string, addr common.Address, blk int, json string) ethtypes.Log {
 	return ethtypes.Log{
-		Address: addr,
-		Data:    StringToRunLogData(json),
+		Address:     addr,
+		BlockNumber: uint64(blk),
+		Data:        StringToRunLogData(json),
 		Topics: []common.Hash{
 			services.RunLogTopic,
-			common.StringToHash("requestID"),
-			common.StringToHash(jobID),
+			StringToHash("requestID"),
+			StringToHash(jobID),
 		},
 	}
+}
+
+func StringToRunLogData(str string) hexutil.Bytes {
+	j := JSONFromString(str)
+	cbor, err := j.CBOR()
+	mustNotErr(err)
+	length := len(cbor)
+	lenHex := utils.RemoveHexPrefix(hexutil.EncodeUint64(uint64(length)))
+	if len(lenHex) < 64 {
+		lenHex = strings.Repeat("0", 64-len(lenHex)) + lenHex
+	}
+
+	data := hex.EncodeToString(cbor)
+	version := utils.EVMHexNumber(1)
+	offset := "0000000000000000000000000000000000000000000000000000000000000020"
+
+	var endPad string
+	if length%32 != 0 {
+		endPad = strings.Repeat("00", (32 - (length % 32)))
+	}
+	return hexutil.MustDecode(version + offset + lenHex + data + endPad)
 }
 
 func BigHexInt(val interface{}) hexutil.Big {
@@ -190,6 +239,11 @@ func BigHexInt(val interface{}) hexutil.Big {
 	}
 }
 
+func NewBigHexInt(val interface{}) *hexutil.Big {
+	rval := BigHexInt(val)
+	return &rval
+}
+
 func RunResultWithValue(val string) models.RunResult {
 	data := models.JSON{}
 	data, err := data.Add("value", val)
@@ -202,14 +256,15 @@ func RunResultWithValue(val string) models.RunResult {
 
 func RunResultWithError(err error) models.RunResult {
 	return models.RunResult{
+		Status:       models.RunStatusErrored,
 		ErrorMessage: null.StringFrom(err.Error()),
 	}
 }
 
-func MarkJobRunPending(jr models.JobRun, i int) models.JobRun {
-	jr.Status = models.StatusPending
-	jr.Result.Pending = true
-	jr.TaskRuns[i].Status = models.StatusPending
-	jr.TaskRuns[i].Result.Pending = true
+func MarkJobRunPendingBridge(jr models.JobRun, i int) models.JobRun {
+	jr.Status = models.RunStatusPendingBridge
+	jr.Result.Status = models.RunStatusPendingBridge
+	jr.TaskRuns[i].Status = models.RunStatusPendingBridge
+	jr.TaskRuns[i].Result.Status = models.RunStatusPendingBridge
 	return jr
 }

@@ -23,8 +23,8 @@ func TestEthereumListener_Connect_WithJobs(t *testing.T) {
 	defer cleanup()
 	eth := cltest.MockEthOnStore(el.Store)
 
-	j1 := cltest.NewJobWithLogInitiator()
-	j2 := cltest.NewJobWithLogInitiator()
+	j1, _ := cltest.NewJobWithLogInitiator()
+	j2, _ := cltest.NewJobWithLogInitiator()
 	assert.Nil(t, el.Store.SaveJob(&j1))
 	assert.Nil(t, el.Store.SaveJob(&j2))
 	eth.RegisterSubscription("logs")
@@ -44,8 +44,8 @@ func TestEthereumListener_reconnectLoop_Resubscribing(t *testing.T) {
 	store, cleanup := cltest.NewStore()
 	defer cleanup()
 	eth := cltest.MockEthOnStore(store)
-	j1 := cltest.NewJobWithLogInitiator()
-	j2 := cltest.NewJobWithLogInitiator()
+	j1, _ := cltest.NewJobWithLogInitiator()
+	j2, _ := cltest.NewJobWithLogInitiator()
 	assert.Nil(t, store.SaveJob(&j1))
 	assert.Nil(t, store.SaveJob(&j2))
 
@@ -74,8 +74,8 @@ func TestEthereumListener_AttachedToHeadTracker(t *testing.T) {
 	store := el.Store
 	defer cleanup()
 	eth := cltest.MockEthOnStore(store)
-	j1 := cltest.NewJobWithLogInitiator()
-	j2 := cltest.NewJobWithLogInitiator()
+	j1, _ := cltest.NewJobWithLogInitiator()
+	j2, _ := cltest.NewJobWithLogInitiator()
 	assert.Nil(t, store.SaveJob(&j1))
 	assert.Nil(t, store.SaveJob(&j2))
 
@@ -138,14 +138,46 @@ func TestEthereumListener_AddJob_Listening(t *testing.T) {
 				Data:    test.data,
 				Topics: []common.Hash{
 					services.RunLogTopic,
-					common.StringToHash("requestID"),
-					common.StringToHash(j.ID),
+					cltest.StringToHash("requestID"),
+					cltest.StringToHash(j.ID),
 				},
 			}
 
 			cltest.WaitForRuns(t, j, store, test.wantCount)
 
 			eth.EventuallyAllCalled(t)
+		})
+	}
+}
+
+func TestEthereumListener_OnNewHead_OnlyRunPendingConfirmations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status     models.RunStatus
+		wantStatus models.RunStatus
+	}{
+		{models.RunStatusPendingBridge, models.RunStatusPendingBridge},
+		{models.RunStatusPendingConfirmations, models.RunStatusCompleted},
+	}
+
+	for _, test := range tests {
+		t.Run(string(test.status), func(t *testing.T) {
+			el, cleanup := cltest.NewEthereumListener()
+			defer cleanup()
+			store := el.Store
+
+			job, initr := cltest.NewJobWithWebInitiator()
+			run := job.NewRun(initr)
+			run.Status = test.status
+
+			assert.Nil(t, store.SaveJob(&job))
+			assert.Nil(t, store.Save(&run))
+			el.OnNewHead(cltest.NewBlockHeader(10))
+
+			refreshed, err := store.FindJobRun(run.ID)
+			assert.Nil(t, err)
+			assert.Equal(t, test.wantStatus, refreshed.Status)
 		})
 	}
 }

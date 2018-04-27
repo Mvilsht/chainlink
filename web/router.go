@@ -19,6 +19,13 @@ func Router(app *services.ChainlinkApplication) *gin.Engine {
 	basicAuth := gin.BasicAuth(gin.Accounts{config.BasicAuthUsername: config.BasicAuthPassword})
 	engine.Use(loggerFunc(), gin.Recovery(), basicAuth)
 
+	v1 := engine.Group("/v1")
+	{
+		ac := AssignmentsController{app}
+		v1.POST("/assignments", ac.Create)
+		v1.GET("/assignments/:ID", ac.Show)
+	}
+
 	v2 := engine.Group("/v2")
 	{
 		j := JobSpecsController{app}
@@ -33,6 +40,9 @@ func Router(app *services.ChainlinkApplication) *gin.Engine {
 
 		tt := BridgeTypesController{app}
 		v2.POST("/bridge_types", tt.Create)
+
+		backup := BackupController{app}
+		v2.GET("/backup", backup.Show)
 	}
 
 	return engine
